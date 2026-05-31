@@ -1,0 +1,7 @@
+[submodule "third_party/Cronopio"]
+	path = third_party/Cronopio
+	url = https://github.com/cronomantic/Cronopio.git
+[submodule "third_party/exult"]
+	path = third_party/exult
+	url = https://github.com/cronomantic/exult.git
+	branch = cronopio-port

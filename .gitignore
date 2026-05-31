@@ -1,0 +1,25 @@
+# Cronopio SDK build trees (auto-built by build_exult.sh)
+third_party/Cronopio/build/
+third_party/Cronopio/build-*/
+/build/
+/dist/
+tools/*.exe
+
+# Cartridges / engine binaries (large, rebuildable)
+*.bin
+*.crom
+
+# Game content is NOT redistributable — Ultima VII (Black Gate) data is
+# copyrighted; keep all baked content out of the repo.
+basegame/
+*.flx
+*.vga
+*.dat
+u7*
+
+# local run artifacts
+*.ppm
+*.png
+*.log
+*.exe
+*.sym
