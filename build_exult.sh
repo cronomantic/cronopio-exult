@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Build the Cronopio Exult cartridge (Exult / Ultima VII -> Cronopio .crom).
 #
-# SCAFFOLD STATUS: this currently only prepares the Cronopio toolchain (so the
-# CronoVM/libc++ work can proceed). The Exult engine bring-up is NOT wired yet —
-# the bring-up order (files/ + ROM-FS factory redirect -> imagewin 8bpp blit ->
-# Audio singleton -> main loop), the SDL3 shim (compat/) and the content
-# pipeline (tools/ expack-equiv + basegame/) are the next steps. See README.
+# BRING-UP STATUS: slice 1 (files/ + ROM-FS) is in. This script preps the
+# Cronopio C++ toolchain (picolibc --with-locale + cxxio.bc), builds our generic
+# CronoFS bake tool (tools/exultpak), and — given a deployed game STATIC dir —
+# bakes it into a ROM and builds the files smoke cart (src/files_smoke.cc) that
+# reads real game files back byte-exact through a zero-copy ROM istream. The
+# imagewin 8bpp blit / audio / main-loop / input slices + the SDL3 compat/ shim
+# are the next steps. See README and memory cronopio-cpp-cart-toolchain.
 #
-# Mirrors cronopio-doom/build_doom.sh and cronopio-quake/build_quake.sh: the
-# nested CronoVM toolchain (cronopio-cc) + host are rebuilt incrementally so a
-# stale host never links an older VM than a freshly-built cart.
+# Usage:  build_exult.sh [STATIC_DIR]
+#   STATIC_DIR : a deployed game data dir (e.g. ".../Ultima 7/STATIC"). If given,
+#                it is baked (READ-ONLY) into build/exult.rom and the smoke cart
+#                links it; if omitted, the cart builds with no ROM.
+#
+# C++ carts are driven through cvm-cc DIRECTLY (not cronopio-cc, which force-adds
+# the SDK include and shadows picolibc's headers). See cronopio-cpp-cart-toolchain.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# --- Cronopio SDK submodule (nested CronoVM + picolibc + TSF + libxmp) -------
 CRONOPIO="$ROOT/third_party/Cronopio"
 if [[ ! -f "$CRONOPIO/CMakeLists.txt" ]]; then
   echo "[build] Cronopio submodule missing — initialising..."
@@ -22,11 +26,22 @@ if [[ ! -f "$CRONOPIO/CMakeLists.txt" ]]; then
     echo "[build] ERROR: could not init the Cronopio submodule." >&2; exit 1; }
 fi
 
+SDK="$CRONOPIO/sdk"
 RT="$CRONOPIO/external/CronoVM/runtime/lib"
+PICO_INC="$CRONOPIO/external/CronoVM/external/picolibc/libc/include"
 CRBUILD="$CRONOPIO/build"
+CVMCC="$CRBUILD/_cvm/tools/cvm-cc/cvm-cc.exe"
+HL="$CRBUILD/tools/headless/cronopio-headless.exe"
 
-# Always run an incremental ninja build so the toolchain + host track the
-# current CronoVM (a stale host traps "unknown opcode" on a fresh cart).
+# Toolchain discovery (override via env). clang for the i386-elf machine-port
+# bitcode + the host bake tool; llvm-link for the runtime libs.
+CLANG="${CLANG:-/c/Users/Sergio/scoop/apps/mingw-mstorsjo-llvm-ucrt/current/bin/clang}"
+CLANGXX="${CLANGXX:-$(dirname "$CLANG")/clang++}"
+LLVM_LINK="${LLVM_LINK:-/c/msys64/ucrt64/bin/llvm-link}"
+
+mkdir -p "$ROOT/build"
+
+# --- 1. Cronopio tools + host (always re-sync with the current VM) ----------
 if [[ ! -f "$CRBUILD/build.ninja" ]]; then
   echo "[build] configuring Cronopio SDK (one-time)..."
   cmake -S "$CRONOPIO" -B "$CRBUILD" -G Ninja || {
@@ -36,12 +51,49 @@ echo "[build] syncing Cronopio tools + host with the current VM..."
 ninja -C "$CRBUILD" cronopio-cc cronopio cronopio-headless || {
   echo "[build] ERROR: building Cronopio tools failed." >&2; exit 1; }
 
-# C library. Exult is C++ with <iostream>/<locale>, so it needs the locale
-# surface (--with-locale) once the engine is wired; for now build the standard
-# stdio surface so the toolchain is exercised.
-echo "[build] building picolibc.bc (C library, --with-stdio)..."
-bash "$RT/build_picolibc.sh" --with-stdio || {
+# --- 2. C++ runtime libs: picolibc (+locale) and the libc++ iostream lib -----
+echo "[build] building picolibc.bc (--with-stdio --with-locale)..."
+CLANG="$CLANG" LLVM_LINK="$LLVM_LINK" bash "$RT/build_picolibc.sh" --with-stdio --with-locale || {
   echo "[build] ERROR: build_picolibc.sh failed." >&2; exit 1; }
+echo "[build] building cxxio.bc (libc++ iostream/locale)..."
+CLANG="$CLANG" LLVM_LINK="$LLVM_LINK" bash "$RT/build_cxxio.sh" || {
+  echo "[build] ERROR: build_cxxio.sh failed." >&2; exit 1; }
 
-echo "[build] Cronopio toolchain ready."
-echo "[build] TODO: Exult engine bring-up not wired yet (see README + src/, compat/, tools/)."
+# --- 3. machine port to bitcode (SDK headers; locale-aware) ------------------
+echo "[build] compiling cron_sys.bc (machine port, -DCRON_SYS_LIBC_HAS_LOCALE)..."
+"$CLANG" --target=i386-elf -ffreestanding -emit-llvm -O1 -gline-tables-only \
+  -DCRON_SYS_LIBC_HAS_LOCALE -I "$SDK/include" -I "$RT" \
+  -c "$SDK/lib/cron_sys.c" -o "$ROOT/build/cron_sys.bc" || {
+  echo "[build] ERROR: compiling cron_sys.c failed." >&2; exit 1; }
+
+# --- 4. our CronoFS bake tool (host) ----------------------------------------
+echo "[build] building exultpak (host bake tool)..."
+"$CLANGXX" -std=c++17 -O2 "$ROOT/tools/exultpak.cc" -o "$ROOT/build/exultpak.exe" || {
+  echo "[build] ERROR: building exultpak failed." >&2; exit 1; }
+
+# --- 5. optional content bake -----------------------------------------------
+ROM_ARG=()
+STATIC_DIR="${1:-}"
+if [[ -n "$STATIC_DIR" ]]; then
+  if [[ ! -d "$STATIC_DIR" ]]; then
+    echo "[build] ERROR: STATIC_DIR '$STATIC_DIR' is not a directory." >&2; exit 1; fi
+  echo "[build] baking '$STATIC_DIR' -> build/exult.rom (read-only)..."
+  "$ROOT/build/exultpak.exe" "$STATIC_DIR" static "$ROOT/build/exult.rom" 2> "$ROOT/build/manifest.txt" || {
+    echo "[build] ERROR: exultpak bake failed." >&2; exit 1; }
+  tail -1 "$ROOT/build/manifest.txt"
+  ROM_ARG=(--rom="$ROOT/build/exult.rom")
+fi
+
+# --- 6. the cart (files smoke for now) --------------------------------------
+echo "[build] building files smoke cart..."
+"$CVMCC" -I "$RT" -I "$ROOT/src" -idirafter "$PICO_INC" -idirafter "$SDK/include" \
+  "$ROOT/src/files_smoke.cc" "$ROOT/src/romfs_cron.cc" \
+  "$ROOT/build/cron_sys.bc" "$RT/picolibc.bc" \
+  "${ROM_ARG[@]+"${ROM_ARG[@]}"}" \
+  --region=fb:76800:rw --region=pal:1024:rw \
+  --heap-reserve=16M --stack-reserve=2M \
+  -o "$ROOT/build/files_smoke.crom" || {
+  echo "[build] ERROR: building the cart failed." >&2; exit 1; }
+
+echo "[build] OK -> build/files_smoke.crom"
+[[ -n "$STATIC_DIR" ]] && echo "[build] run: \"$HL\" build/files_smoke.crom 5"
