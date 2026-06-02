@@ -143,3 +143,40 @@ echo "[build] building win_probe cart (Image_window8 -> CRON_FB, render slice 2b
 
 echo "[build] OK -> build/win_probe.crom"
 echo "[build] run: \"$HL\" build/win_probe.crom 5   (expect 'presented ...' + distinct colors ~17)"
+
+# --- 8. the content render cart (slice 3: real U7 shapes -> CRON_FB) ---------
+# Needs the baked ROM (a STATIC_DIR), so only built when one was given. Renders
+# REAL Ultima 7 art end to end through Exult's OWN pipeline: the game palette
+# from <STATIC>/palettes.flx + a grid of <STATIC>/faces.vga portraits, decoded
+# by Exult's Vga_file/Shape_frame and composited via paint_rle/paint into the
+# engine's Image_buffer8, then blitted to CRON_FB. File access routes through
+# Exult's U7open_in -> the ROM (the files_cron bridge from slice 1). Proves the
+# content -> shape -> render chain. See memory exult-render-slice2b / port-scout.
+if [[ -n "$STATIC_DIR" ]]; then
+  echo "[build] building shape_probe cart (real U7 shapes -> CRON_FB, render slice 3)..."
+  EXFILES=( "$EX/files/utils.cc" "$EX/files/U7file.cc" "$EX/files/U7fileman.cc" \
+            "$EX/files/U7obj.cc" "$EX/files/Flex.cc" "$EX/files/IFF.cc" \
+            "$EX/files/Table.cc" "$EX/files/Flat.cc" )
+  "$CVMCC" \
+    -I "$RT" -I "$ROOT/src" -I "$ROOT/compat" \
+    -idirafter "$PICO_INC" -idirafter "$SDK/include" \
+    -I "$IW" -I "$EX/headers" -I "$EX/files" -I "$EX/shapes" -I "$EX/conf" -I "$EX/gumps" -I "$EX" \
+    -DHAVE_CONFIG_H -DNDEBUG -include "$ROOT/compat/cronopio_prelude.h" \
+    "$ROOT/src/shape_probe.cc" "$ROOT/src/vid_cron.cc" \
+    "$ROOT/src/files_cron.cc" "$ROOT/src/romfs_cron.cc" \
+    "$ROOT/compat/SDL_cron.cc" "$ROOT/compat/exult_stubs.cc" \
+    "${EXFILES[@]}" "$EX/shapes/vgafile.cc" \
+    "$IW/imagewin.cc" "$IW/iwin8.cc" "$IW/ibuf8.cc" "$IW/imagebuf.cc" "$EX/istring.cc" \
+    "$IW/scale_2x.cc" "$IW/scale_2xSaI.cc" "$IW/scale_interlace.cc" "$IW/scale_bilinear.cc" \
+    "$IW/scale_hq2x.cc" "$IW/scale_hq3x.cc" "$IW/scale_hq4x.cc" "$IW/scale_xbr.cc" "$IW/scale_point.cc" \
+    "$IW/PointScaler.cpp" "$IW/BilinearScaler.cpp" "$IW/BilinearScalerInternal_2x.cpp" \
+    "$IW/BilinearScalerInternal_Arb.cpp" "$IW/BilinearScalerInternal_X1Y12.cpp" \
+    "$IW/BilinearScalerInternal_X2Y24.cpp" \
+    "$ROOT/build/cron_sys.bc" "$RT/picolibc.bc" "${ROM_ARG[@]+"${ROM_ARG[@]}"}" \
+    --region=fb:76800:rw --region=pal:1024:rw \
+    --heap-reserve=16M --stack-reserve=2M \
+    -o "$ROOT/build/shape_probe.crom" || {
+    echo "[build] ERROR: building shape_probe failed." >&2; exit 1; }
+  echo "[build] OK -> build/shape_probe.crom"
+  echo "[build] run: \"$HL\" build/shape_probe.crom 5 --ppm build/shape_shot.ppm   (15 U7 faces, ~187 colours)"
+fi
