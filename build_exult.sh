@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Build the Cronopio Exult cartridge (Exult / Ultima VII -> Cronopio .crom).
 #
-# BRING-UP STATUS: slice 1 (files/ + ROM-FS) is in. This script preps the
-# Cronopio C++ toolchain (picolibc --with-locale + cxxio.bc), builds our generic
-# CronoFS bake tool (tools/exultpak), and — given a deployed game STATIC dir —
-# bakes it into a ROM and builds the files smoke cart (src/files_smoke.cc) that
-# reads real game files back byte-exact through a zero-copy ROM istream. The
-# imagewin 8bpp blit / audio / main-loop / input slices + the SDL3 compat/ shim
-# are the next steps. See README and memory cronopio-cpp-cart-toolchain.
+# BRING-UP STATUS: slice 1 (files/ + ROM-FS) is in — Exult's REAL file layer
+# (files/utils.cc) now runs on the VM, redirected to Cronopio storage. This
+# script preps the Cronopio C++ toolchain (picolibc --with-locale + cxxio.bc),
+# builds our generic CronoFS bake tool (tools/exultpak), and — given a deployed
+# game STATIC dir — bakes it into a ROM and builds the files probe cart
+# (src/files_probe.cc) that reads real game files back byte-exact through Exult's
+# own U7open_in and round-trips a GAMEDAT write through the RAM-FS. The imagewin
+# 8bpp blit / audio / main-loop / input slices + the SDL3 compat/ shim (incl.
+# SDL_IOStream, the 2nd I/O path) are the next steps. See README + memory
+# cronopio-cpp-cart-toolchain / exult-port-scout.
 #
 # Usage:  build_exult.sh [STATIC_DIR]
 #   STATIC_DIR : a deployed game data dir (e.g. ".../Ultima 7/STATIC"). If given,
@@ -29,6 +32,7 @@ fi
 SDK="$CRONOPIO/sdk"
 RT="$CRONOPIO/external/CronoVM/runtime/lib"
 PICO_INC="$CRONOPIO/external/CronoVM/external/picolibc/libc/include"
+EX="$ROOT/third_party/exult"   # Exult engine fork (branch cronopio-port)
 CRBUILD="$CRONOPIO/build"
 CVMCC="$CRBUILD/_cvm/tools/cvm-cc/cvm-cc.exe"
 HL="$CRBUILD/tools/headless/cronopio-headless.exe"
@@ -84,16 +88,26 @@ if [[ -n "$STATIC_DIR" ]]; then
   ROM_ARG=(--rom="$ROOT/build/exult.rom")
 fi
 
-# --- 6. the cart (files smoke for now) --------------------------------------
-echo "[build] building files smoke cart..."
-"$CVMCC" -I "$RT" -I "$ROOT/src" -idirafter "$PICO_INC" -idirafter "$SDK/include" \
-  "$ROOT/src/files_smoke.cc" "$ROOT/src/romfs_cron.cc" \
+# --- 6. the cart (slice 1 files probe) --------------------------------------
+# Drives Exult's REAL file layer (third_party/exult/files/utils.cc) through the
+# Cronopio bridge (src/files_cron.cc): the istream/ostream factories route reads
+# to the ROM-FS (romfs_cron) then the RAM-FS, writes to the RAM-FS. utils.cc
+# compiles unpatched against compat/config.h (-DHAVE_CONFIG_H) with asserts off
+# (-DNDEBUG). Include order: the cart's src/ + compat/, then Exult's files/headers
+# dirs, then (idirafter) picolibc and the SDK so libc++'s wrappers win.
+echo "[build] building files probe cart (Exult file layer over ROM-FS/RAM-FS)..."
+"$CVMCC" \
+  -I "$RT" -I "$ROOT/src" -I "$ROOT/compat" \
+  -idirafter "$PICO_INC" -idirafter "$SDK/include" \
+  -I "$EX/files" -I "$EX/headers" -I "$EX" -DHAVE_CONFIG_H -DNDEBUG \
+  "$ROOT/src/files_probe.cc" "$ROOT/src/files_cron.cc" "$ROOT/src/romfs_cron.cc" \
+  "$EX/files/utils.cc" \
   "$ROOT/build/cron_sys.bc" "$RT/picolibc.bc" \
   "${ROM_ARG[@]+"${ROM_ARG[@]}"}" \
   --region=fb:76800:rw --region=pal:1024:rw \
   --heap-reserve=16M --stack-reserve=2M \
-  -o "$ROOT/build/files_smoke.crom" || {
+  -o "$ROOT/build/files_probe.crom" || {
   echo "[build] ERROR: building the cart failed." >&2; exit 1; }
 
-echo "[build] OK -> build/files_smoke.crom"
-[[ -n "$STATIC_DIR" ]] && echo "[build] run: \"$HL\" build/files_smoke.crom 5"
+echo "[build] OK -> build/files_probe.crom"
+[[ -n "$STATIC_DIR" ]] && echo "[build] run: \"$HL\" build/files_probe.crom 5"
