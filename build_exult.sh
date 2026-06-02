@@ -111,3 +111,35 @@ echo "[build] building files probe cart (Exult file layer over ROM-FS/RAM-FS)...
 
 echo "[build] OK -> build/files_probe.crom"
 [[ -n "$STATIC_DIR" ]] && echo "[build] run: \"$HL\" build/files_probe.crom 5"
+
+# --- 7. the render cart (slice 2b: Image_window8 -> CRON_FB) -----------------
+# Brings up Exult's REAL Image_window8 (imagewin/iwin8/ibuf8 + the scaler table)
+# on the VM with ZERO source patches. The SDL3 chain is shimmed in compat/
+# (SDL_GetDesktopDisplayMode reports INDEX8 so create_surface composites an 8bpp
+# surface); win_probe draws a test pattern with the window's own fill8/draw_line8
+# and blits the engine's 8bpp buffer (get_ib8()->get_bits()) + palette to CRON_FB
+# via src/vid_cron.cc — the "observe the engine buffer" present model (no
+# UpdateRect patch). No ROM needed. See memory exult-render-slice2b.
+IW="$EX/imagewin"
+echo "[build] building win_probe cart (Image_window8 -> CRON_FB, render slice 2b)..."
+"$CVMCC" \
+  -I "$RT" -I "$ROOT/src" -I "$ROOT/compat" \
+  -idirafter "$PICO_INC" -idirafter "$SDK/include" \
+  -I "$IW" -I "$EX/headers" -I "$EX/files" -I "$EX/conf" -I "$EX/shapes" -I "$EX/gumps" -I "$EX" \
+  -DHAVE_CONFIG_H -DNDEBUG -include "$ROOT/compat/cronopio_prelude.h" \
+  "$ROOT/src/win_probe.cc" "$ROOT/src/vid_cron.cc" \
+  "$ROOT/compat/SDL_cron.cc" "$ROOT/compat/exult_stubs.cc" \
+  "$IW/imagewin.cc" "$IW/iwin8.cc" "$IW/ibuf8.cc" "$IW/imagebuf.cc" "$EX/istring.cc" \
+  "$IW/scale_2x.cc" "$IW/scale_2xSaI.cc" "$IW/scale_interlace.cc" "$IW/scale_bilinear.cc" \
+  "$IW/scale_hq2x.cc" "$IW/scale_hq3x.cc" "$IW/scale_hq4x.cc" "$IW/scale_xbr.cc" "$IW/scale_point.cc" \
+  "$IW/PointScaler.cpp" "$IW/BilinearScaler.cpp" "$IW/BilinearScalerInternal_2x.cpp" \
+  "$IW/BilinearScalerInternal_Arb.cpp" "$IW/BilinearScalerInternal_X1Y12.cpp" \
+  "$IW/BilinearScalerInternal_X2Y24.cpp" \
+  "$ROOT/build/cron_sys.bc" "$RT/picolibc.bc" \
+  --region=fb:76800:rw --region=pal:1024:rw \
+  --heap-reserve=16M --stack-reserve=2M \
+  -o "$ROOT/build/win_probe.crom" || {
+  echo "[build] ERROR: building win_probe failed." >&2; exit 1; }
+
+echo "[build] OK -> build/win_probe.crom"
+echo "[build] run: \"$HL\" build/win_probe.crom 5   (expect 'presented ...' + distinct colors ~17)"
