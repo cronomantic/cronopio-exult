@@ -153,13 +153,13 @@ echo "[build] run: \"$HL\" build/win_probe.crom 5   (expect 'presented ...' + di
 # routes through Exult's U7open_in -> the ROM (the files_cron bridge from slice 1).
 # build_render_cart <main.cc> <out.crom> — same TU set, just a different probe main.
 build_render_cart() {
-  local main_src="$1" out="$2"
+  local main_src="$1" out="$2"; shift 2; local extra=("$@")
   "$CVMCC" \
     -I "$RT" -I "$ROOT/src" -I "$ROOT/compat" \
     -idirafter "$PICO_INC" -idirafter "$SDK/include" \
     -I "$IW" -I "$EX/headers" -I "$EX/files" -I "$EX/shapes" -I "$EX/conf" -I "$EX/gumps" -I "$EX" \
     -DHAVE_CONFIG_H -DNDEBUG -include "$ROOT/compat/cronopio_prelude.h" \
-    "$main_src" "$ROOT/src/vid_cron.cc" \
+    "$main_src" "${extra[@]+"${extra[@]}"}" "$ROOT/src/vid_cron.cc" \
     "$ROOT/src/files_cron.cc" "$ROOT/src/romfs_cron.cc" \
     "$ROOT/compat/SDL_cron.cc" "$ROOT/compat/exult_stubs.cc" \
     "$EX/files/utils.cc" "$EX/files/U7file.cc" "$EX/files/U7fileman.cc" \
@@ -191,4 +191,9 @@ if [[ -n "$STATIC_DIR" ]]; then
   build_render_cart "$ROOT/src/object_probe.cc" "$ROOT/build/object_probe.crom" || {
     echo "[build] ERROR: building object_probe failed." >&2; exit 1; }
   echo "[build] OK -> build/object_probe.crom  (run: \"$HL\" build/object_probe.crom 5 --ppm build/object_shot.ppm  -> U7 terrain + ifix objects: trees/signs/walls)"
+
+  echo "[build] building text_probe cart (real U7 fonts via Exult Font -> CRON_FB, render slice text)..."
+  build_render_cart "$ROOT/src/text_probe.cc" "$ROOT/build/text_probe.crom" "$EX/shapes/font.cc" || {
+    echo "[build] ERROR: building text_probe failed." >&2; exit 1; }
+  echo "[build] OK -> build/text_probe.crom  (run: \"$HL\" build/text_probe.crom 5 --ppm build/text_shot.ppm  -> real U7 text lines in several fonts)"
 fi
