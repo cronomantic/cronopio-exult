@@ -266,6 +266,7 @@ extern SDL_Keycode SDL_GetKeyFromScancode(SDL_Scancode scancode, SDL_Keymod mods
 extern const char* SDL_GetKeyName(SDL_Keycode key);
 extern bool        SDL_StartTextInput(SDL_Window* window);
 extern bool        SDL_StopTextInput(SDL_Window* window);
+extern bool        SDL_TextInputActive(SDL_Window* window);
 
 /* touch (inert on Cronopio — no touch device; returns nullptr/0) */
 extern SDL_Finger** SDL_GetTouchFingers(SDL_TouchID touchID, int* count);

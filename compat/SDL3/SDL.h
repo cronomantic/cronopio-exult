@@ -68,6 +68,27 @@ typedef struct SDL_Rect {
     int x, y, w, h;
 } SDL_Rect;
 
+typedef struct SDL_Point {
+    int x, y;
+} SDL_Point;
+
+extern SDL_bool SDL_GetRectEnclosingPoints(const SDL_Point* points, int count,
+                                           const SDL_Rect* clip, SDL_Rect* result);
+
+/* hints — inert under Cronopio (SDL_SetHint is a no-op); the names the engine sets */
+extern SDL_bool    SDL_SetHint(const char* name, const char* value);
+extern const char* SDL_GetHint(const char* name);
+#define SDL_HINT_RETURN_KEY_HIDES_IME          "SDL_RETURN_KEY_HIDES_IME"
+#define SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES    "SDL_AUDIO_DEVICE_SAMPLE_FRAMES"
+#define SDL_HINT_AUDIO_DRIVER                  "SDL_AUDIO_DRIVER"
+#define SDL_HINT_IOS_HIDE_HOME_INDICATOR       "SDL_IOS_HIDE_HOME_INDICATOR"
+#define SDL_HINT_MOUSE_EMULATE_WARP_WITH_RELATIVE "SDL_MOUSE_EMULATE_WARP_WITH_RELATIVE"
+#define SDL_HINT_MOUSE_RELATIVE_MODE_WARP      "SDL_MOUSE_RELATIVE_MODE_WARP"
+#define SDL_HINT_ORIENTATIONS                  "SDL_ORIENTATIONS"
+#define SDL_HINT_RENDER_DRIVER                 "SDL_RENDER_DRIVER"
+#define SDL_HINT_VIDEO_DRIVER                  "SDL_VIDEO_DRIVER"
+#define SDL_HINT_VIDEO_WAYLAND_EMULATE_MOUSE_WARP "SDL_VIDEO_WAYLAND_EMULATE_MOUSE_WARP"
+
 typedef Uint32 SDL_DisplayID;
 
 typedef struct SDL_DisplayMode {
@@ -110,7 +131,14 @@ typedef enum SDL_RendererLogicalPresentation {
 
 /* ---- surface + palette (REAL, implemented in compat/SDL_cron.cc) -------- */
 extern SDL_Surface* SDL_CreateSurface(int width, int height, SDL_PixelFormat format);
+extern SDL_Surface* SDL_CreateSurfaceFrom(int width, int height, SDL_PixelFormat format,
+                                          void* pixels, int pitch);
 extern void         SDL_DestroySurface(SDL_Surface* surface);
+
+/* convenience zero-init macros (SDL3 spellings) */
+#define SDL_zero(x)  __builtin_memset(&(x), 0, sizeof(x))
+#define SDL_zerop(x) __builtin_memset((x), 0, sizeof(*(x)))
+#define SDL_zeroa(x) __builtin_memset((x), 0, sizeof(x))
 extern SDL_Palette* SDL_CreateSurfacePalette(SDL_Surface* surface);
 extern SDL_Palette* SDL_GetSurfacePalette(SDL_Surface* surface);
 extern SDL_bool     SDL_SetPaletteColors(SDL_Palette* palette, const SDL_Color* colors,
