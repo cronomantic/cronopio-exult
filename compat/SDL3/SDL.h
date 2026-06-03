@@ -15,23 +15,11 @@
 #ifndef CRONOPIO_SDL3_SDL_H
 #define CRONOPIO_SDL3_SDL_H
 
-#include <cstddef>
-#include <cstdint>
+#include <SDL3/SDL_stdinc.h>   /* scalar types (Sint8..Uint64, SDL_bool) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ---- scalar types (SDL spellings) -------------------------------------- */
-typedef int8_t   Sint8;
-typedef uint8_t  Uint8;
-typedef int16_t  Sint16;
-typedef uint16_t Uint16;
-typedef int32_t  Sint32;
-typedef uint32_t Uint32;
-typedef int64_t  Sint64;
-typedef uint64_t Uint64;
-typedef int      SDL_bool; /* SDL3 uses real bool; int is layout-compatible here */
 
 /* ---- pixel formats (only the ones the render path names) --------------- */
 typedef enum SDL_PixelFormat {
@@ -149,6 +137,7 @@ extern SDL_bool      SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* 
 extern SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* window);
 
 extern SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, const char* name);
+extern SDL_Renderer* SDL_GetRenderer(SDL_Window* window);
 extern void          SDL_DestroyRenderer(SDL_Renderer* renderer);
 extern SDL_bool      SDL_SetRenderVSync(SDL_Renderer* renderer, int vsync);
 extern SDL_bool      SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
@@ -174,6 +163,25 @@ extern SDL_bool          SDL_GetClosestFullscreenDisplayMode(SDL_DisplayID displ
                                                              float refresh_rate, SDL_bool include_high_density,
                                                              SDL_DisplayMode* closest);
 
+#ifdef __cplusplus
+}
+#endif
+
+/* The <SDL3/SDL.h> umbrella pulls the rest of the shimmed API, like real SDL3
+ * (these are include-guarded and re-include SDL.h, which is a no-op here since
+ * our guard is already defined). Subsystems that include a sub-header directly
+ * (e.g. Gump.h -> SDL_keycode.h) still get the base types via this file. */
+#include <SDL3/SDL_keycode.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_timer.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Render-coordinate mapping — declared here (after SDL_events.h) because it
+ * takes an SDL_Event*. The renderer is inert under Cronopio, so the impl maps
+ * 1:1 (no logical-presentation scaling); the cart presents the 8bpp buffer. */
+extern SDL_bool SDL_ConvertEventToRenderCoordinates(SDL_Renderer* renderer, SDL_Event* event);
 #ifdef __cplusplus
 }
 #endif
