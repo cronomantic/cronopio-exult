@@ -186,4 +186,9 @@ if [[ -n "$STATIC_DIR" ]]; then
   build_render_cart "$ROOT/src/map_probe.cc" "$ROOT/build/map_probe.crom" || {
     echo "[build] ERROR: building map_probe failed." >&2; exit 1; }
   echo "[build] OK -> build/map_probe.crom  (run: \"$HL\" build/map_probe.crom 5 --ppm build/map_shot.ppm  -> U7 terrain: grass/forest/water)"
+
+  echo "[build] building object_probe cart (real U7 ifix objects on terrain -> CRON_FB, render slice objects)..."
+  build_render_cart "$ROOT/src/object_probe.cc" "$ROOT/build/object_probe.crom" || {
+    echo "[build] ERROR: building object_probe failed." >&2; exit 1; }
+  echo "[build] OK -> build/object_probe.crom  (run: \"$HL\" build/object_probe.crom 5 --ppm build/object_shot.ppm  -> U7 terrain + ifix objects: trees/signs/walls)"
 fi
