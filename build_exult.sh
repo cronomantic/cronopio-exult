@@ -75,6 +75,38 @@ echo "[build] building exultpak (host bake tool)..."
 "$CLANGXX" -std=c++17 -O2 "$ROOT/tools/exultpak.cc" -o "$ROOT/build/exultpak.exe" || {
   echo "[build] ERROR: building exultpak failed." >&2; exit 1; }
 
+# --- 4b. Exult's OWN data (exult.flx/exult_bg.flx/... + the generated *_flx.h) ---
+# Build Exult's in-tree `expack` (host) and run its data-build chain — the REAL
+# Exult tooling (user's choice), which emits both the .flx archives AND the
+# data/<name>_flx.h member-index headers that game.cc/shapeid.cc/bggame.cc
+# #include. expack only needs files/libu7file (no SDL). The .in listings name
+# their output relative to the listing's dir, and member entries likewise, so
+# each invocation runs with cwd = exult/data. Generated files are mostly
+# upstream-gitignored (don't dirty the fork); we treat them as build artifacts.
+# Order matters: fonts + shortcutbar before flx.in (it embeds them); the bg
+# paperdol/mr_faces/introsfx before bg/flx.in.
+echo "[build] building expack (Exult's host data packer)..."
+"$CLANGXX" -std=c++17 -O2 -DHAVE_CONFIG_H -DNDEBUG \
+  -I "$EX/files" -I "$EX/headers" -I "$EX/conf" -I "$ROOT/compat" -I "$EX" \
+  "$EX/tools/expack.cc" \
+  "$EX/files/Flex.cc" "$EX/files/U7file.cc" "$EX/files/U7fileman.cc" "$EX/files/U7obj.cc" \
+  "$EX/files/crc.cc" "$EX/files/Table.cc" "$EX/files/IFF.cc" "$EX/files/Flat.cc" \
+  "$EX/files/utils.cc" "$EX/files/listfiles.cc" \
+  -o "$ROOT/build/expack.exe" || {
+  echo "[build] ERROR: building expack failed." >&2; exit 1; }
+
+echo "[build] generating Exult data (exult*.flx + data/*_flx.h) via expack..."
+EXPACK="$ROOT/build/expack.exe"
+( cd "$EX/data" && for lst in \
+    fonts/original.in fonts/serif.in shortcutbar.in flx.in \
+    bg/bg_paperdol.in bg/bg_mr_faces.in bg/introsfx_mt.in bg/introsfx_sb.in bg/flx.in \
+    si/flx.in ; do
+    "$EXPACK" -i "$lst" >/dev/null 2>&1 || { echo "[build] ERROR: expack -i $lst failed." >&2; exit 1; }
+  done ) || exit 1
+[[ -f "$EX/data/exult_flx.h" && -f "$EX/data/exult_bg_flx.h" ]] || {
+  echo "[build] ERROR: expack did not produce the *_flx.h headers." >&2; exit 1; }
+echo "[build] OK -> Exult data + headers generated"
+
 # --- 5. optional content bake -----------------------------------------------
 ROM_ARG=()
 STATIC_DIR="${1:-}"
@@ -157,7 +189,8 @@ build_render_cart() {
   "$CVMCC" \
     -I "$RT" -I "$ROOT/src" -I "$ROOT/compat" \
     -idirafter "$PICO_INC" -idirafter "$SDK/include" \
-    -I "$IW" -I "$EX/headers" -I "$EX/files" -I "$EX/shapes" -I "$EX/conf" -I "$EX/gumps" -I "$EX" \
+    -I "$IW" -I "$EX/headers" -I "$EX/files" -I "$EX/shapes" -I "$EX/shapes/shapeinf" \
+    -I "$EX/conf" -I "$EX/gumps" -I "$EX/data" -I "$EX" \
     -DHAVE_CONFIG_H -DNDEBUG -include "$ROOT/compat/cronopio_prelude.h" \
     "$main_src" "${extra[@]+"${extra[@]}"}" "$ROOT/src/vid_cron.cc" \
     "$ROOT/src/files_cron.cc" "$ROOT/src/romfs_cron.cc" \
