@@ -244,15 +244,134 @@ void   SDL_Delay(Uint32) {}
 SDL_TimerID SDL_AddTimer(Uint32, SDL_TimerCallback, void*) { return 0; }
 bool        SDL_RemoveTimer(SDL_TimerID) { return true; }
 
-/* ---- events / input query ----------------------------------------------- *
- * INERT for now: no events are queued and all input-state queries report
- * "nothing pressed". The synthetic input layer (pad/mouse -> SDL events + the
- * OSK, see memory exult-input-model) plugs in HERE later; for Phase-1 frame
- * bring-up the engine simply sees an idle keyboard/mouse. */
-bool   SDL_PollEvent(SDL_Event* event) { (void)event; return false; }
-bool   SDL_PushEvent(SDL_Event*) { return true; }
-void   SDL_PumpEvents(void) {}
-int    SDL_PeepEvents(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) { return 0; }
+/* ---- events / input query: synthetic SDL events from Cronopio pad+mouse --- *
+ * The DECIDED input model (memory exult-input-model / exult-sdl3-shim): the cart
+ * (which IS our exult.cc) drives Exult's NATIVE input by mirroring Handle_events/
+ * Handle_event over PUBLIC engine APIs, fed by SDL events THIS shim synthesises
+ * from `cron_pad`/`cron_mouse`. Each cart frame calls SDL_PumpEvents() once to
+ * build the frame's events into a queue; SDL_PollEvent() drains it (returns false
+ * when empty, ending the frame's `while (SDL_PollEvent(&e)) Handle_event(e)`).
+ *
+ * This slice (movement-first): MOUSE motion/button/wheel + the d-pad as the LEFT
+ * thumb-stick axis (drives Exult's joy_aim->start_actor). Pad FACE buttons ->
+ * synthetic key events come in the action slice (need Exult's default keycodes).
+ *
+ * Cronopio mouse button bits are 1=L,2=R,4=M (headless.c); SDL masks are
+ * L=1<<0, M=1<<1, R=1<<2 — so L/R/M must be REMAPPED, not copied. */
+
+/* per-frame event queue (ring buffer) */
+enum { EVQ_CAP = 128 };
+static SDL_Event g_evq[EVQ_CAP];
+static int       g_evq_head = 0, g_evq_tail = 0;
+static void evq_push(const SDL_Event* e) {
+    int n = (g_evq_tail + 1) % EVQ_CAP;
+    if (n == g_evq_head) return;          /* full: drop (frame over-busy) */
+    g_evq[g_evq_tail] = *e;
+    g_evq_tail = n;
+}
+static bool evq_pop(SDL_Event* e) {
+    if (g_evq_head == g_evq_tail) return false;
+    *e = g_evq[g_evq_head];
+    g_evq_head = (g_evq_head + 1) % EVQ_CAP;
+    return true;
+}
+
+/* live input state (updated each pump; read by the *State queries + gamepad) */
+static float  g_mouse_x = 0.0f, g_mouse_y = 0.0f;
+static Uint32 g_mouse_sdl_mask = 0;        /* SDL L/M/R mask */
+static Uint32 g_prev_pad = 0;
+static Sint16 g_axis_x = 0, g_axis_y = 0;  /* synthetic LEFT stick from d-pad */
+static int    g_gamepad_dev = 0;           /* dummy device handle backing */
+
+static Uint32 cron_to_sdl_mouse_mask(uint32_t cb) {
+    Uint32 m = 0;
+    if (cb & 1u) m |= SDL_BUTTON_LMASK;    /* cron L (1) -> SDL L (1<<0) */
+    if (cb & 2u) m |= SDL_BUTTON_RMASK;    /* cron R (2) -> SDL R (1<<2) */
+    if (cb & 4u) m |= SDL_BUTTON_MMASK;    /* cron M (4) -> SDL M (1<<1) */
+    return m;
+}
+
+void SDL_PumpEvents(void) {
+    /* ---- mouse ---- */
+    int32_t  mx = 0, my = 0;
+    uint32_t cb        = cron_mouse(&mx, &my);
+    Uint32   sdl_mask  = cron_to_sdl_mouse_mask(cb);
+    float    fx = (float)mx, fy = (float)my;
+
+    if (fx != g_mouse_x || fy != g_mouse_y) {
+        SDL_Event e;
+        std::memset(&e, 0, sizeof e);
+        e.type         = SDL_EVENT_MOUSE_MOTION;
+        e.motion.state = sdl_mask;
+        e.motion.x = fx;  e.motion.y = fy;
+        e.motion.xrel = fx - g_mouse_x;
+        e.motion.yrel = fy - g_mouse_y;
+        evq_push(&e);
+    }
+    /* button edges (this frame vs last) */
+    Uint32 down = sdl_mask & ~g_mouse_sdl_mask;
+    Uint32 up   = g_mouse_sdl_mask & ~sdl_mask;
+    const Uint8 btns[3] = {SDL_BUTTON_LEFT, SDL_BUTTON_MIDDLE, SDL_BUTTON_RIGHT};
+    for (int i = 0; i < 3; ++i) {
+        Uint32 bit = SDL_BUTTON_MASK(btns[i]);
+        if ((down | up) & bit) {
+            SDL_Event e;
+            std::memset(&e, 0, sizeof e);
+            e.type         = (down & bit) ? SDL_EVENT_MOUSE_BUTTON_DOWN
+                                          : SDL_EVENT_MOUSE_BUTTON_UP;
+            e.button.button = btns[i];
+            e.button.down   = (down & bit) != 0;
+            e.button.clicks = 1;
+            e.button.x = fx;  e.button.y = fy;
+            evq_push(&e);
+        }
+    }
+    /* wheel impulse */
+    int wheel = (int)cron_mouse_wheel();
+    if (wheel != 0) {
+        SDL_Event e;
+        std::memset(&e, 0, sizeof e);
+        e.type          = SDL_EVENT_MOUSE_WHEEL;
+        e.wheel.y       = (float)wheel;
+        e.wheel.mouse_x = fx;  e.wheel.mouse_y = fy;
+        evq_push(&e);
+    }
+    g_mouse_x = fx;  g_mouse_y = fy;  g_mouse_sdl_mask = sdl_mask;
+
+    /* ---- d-pad -> LEFT thumb-stick axis (full deflection) ---- */
+    uint32_t pad = cron_pad(0);
+    Sint16   ax  = (Sint16)(((pad & CRON_BTN_RIGHT) ? SDL_JOYSTICK_AXIS_MAX : 0)
+                          - ((pad & CRON_BTN_LEFT)  ? SDL_JOYSTICK_AXIS_MAX : 0));
+    Sint16   ay  = (Sint16)(((pad & CRON_BTN_DOWN)  ? SDL_JOYSTICK_AXIS_MAX : 0)
+                          - ((pad & CRON_BTN_UP)    ? SDL_JOYSTICK_AXIS_MAX : 0));
+    if (ax != g_axis_x) {
+        g_axis_x = ax;
+        SDL_Event e; std::memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.axis = (Uint8)SDL_GAMEPAD_AXIS_LEFTX;
+        e.gaxis.value = ax;
+        evq_push(&e);
+    }
+    if (ay != g_axis_y) {
+        g_axis_y = ay;
+        SDL_Event e; std::memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.axis = (Uint8)SDL_GAMEPAD_AXIS_LEFTY;
+        e.gaxis.value = ay;
+        evq_push(&e);
+    }
+    g_prev_pad = pad;
+}
+
+bool SDL_PollEvent(SDL_Event* event) {
+    if (!event) return false;
+    return evq_pop(event);
+}
+bool SDL_PushEvent(SDL_Event* event) {
+    if (event) evq_push(event);
+    return true;
+}
+int  SDL_PeepEvents(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) { return 0; }
 Uint32 SDL_RegisterEvents(int numevents) {
     /* Hand out a fresh user-event type range, starting at SDL_EVENT_USER. */
     static Uint32 next = SDL_EVENT_USER;
@@ -261,15 +380,25 @@ Uint32 SDL_RegisterEvents(int numevents) {
     return base;
 }
 
-SDL_Keymod   SDL_GetModState(void) { return 0; }
+SDL_Keymod   SDL_GetModState(void) { return 0; }  /* no pad->modifier yet */
 const bool*  SDL_GetKeyboardState(int* numkeys) {
-    static bool keys[512] = {};   /* enough HID slots; all up */
+    static bool keys[512] = {};   /* enough HID slots; all up (no synthetic keys yet) */
     if (numkeys) *numkeys = 512;
     return keys;
 }
 SDL_MouseButtonFlags SDL_GetMouseState(float* x, float* y) {
-    if (x) *x = 0.0f;
-    if (y) *y = 0.0f;
+    if (x) *x = g_mouse_x;
+    if (y) *y = g_mouse_y;
+    return g_mouse_sdl_mask;
+}
+
+/* ---- gamepad (axis only): one fixed device, left stick = the d-pad -------- */
+SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID) { return (SDL_Gamepad*)&g_gamepad_dev; }
+void         SDL_CloseGamepad(SDL_Gamepad*) {}
+SDL_Gamepad* SDL_GetGamepadFromID(SDL_JoystickID) { return (SDL_Gamepad*)&g_gamepad_dev; }
+Sint16       SDL_GetGamepadAxis(SDL_Gamepad*, SDL_GamepadAxis axis) {
+    if (axis == SDL_GAMEPAD_AXIS_LEFTX) return g_axis_x;
+    if (axis == SDL_GAMEPAD_AXIS_LEFTY) return g_axis_y;
     return 0;
 }
 const char*  SDL_GetKeyName(SDL_Keycode) { return ""; }

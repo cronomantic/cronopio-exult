@@ -205,6 +205,7 @@ extern SDL_bool          SDL_GetClosestFullscreenDisplayMode(SDL_DisplayID displ
  * (e.g. Gump.h -> SDL_keycode.h) still get the base types via this file. */
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_timer.h>
 
 #ifdef __cplusplus

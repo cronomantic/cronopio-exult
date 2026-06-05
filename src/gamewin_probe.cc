@@ -30,7 +30,8 @@
 #include "vid_cron.h"      /* vid_present -> CRON_FB */
 #include "tqueue.h"        /* Time_queue::activate (per-frame world advance) */
 #include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps */
-#include "SDL3/SDL.h"      /* SDL_GetTicks (host ms clock, shimmed) */
+#include "mouse.h"         /* Mouse::*_speed_factor (static), Mouse::mouse() */
+#include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
 
 #include <cstdio>
 #include <exception>
@@ -127,55 +128,93 @@ void setup(void) {
     cron_exit(0);
 }
 
-/* --- Input: drive the Avatar from the Cronopio mouse + d-pad. ---------------
- * Both controls map to Game_window's PUBLIC start_actor()/stop_actor(), called
- * directly cart-side — no exult.cc, no fork patch (fork-patch-policy):
- *   - MOUSE (U7-native): hold the RIGHT button to walk toward the cursor.
- *     cron_mouse's position is already in window coords (vid_present blits the
- *     framebuffer top-left, unscaled), so it feeds start_actor directly. Mirrors
- *     exult.cc Handle_events' RMASK path (re-issued each frame the button held).
- *   - D-PAD: a held direction aims a point 50px from the window centre (where
- *     the Avatar is drawn). Mirrors the SDL_EVENT_GAMEPAD_AXIS_MOTION handler.
- * The single-tile / direction-change re-issue guard matches Handle_events'
- * `!is_moving() || step_tile_delta==1`. Mouse takes priority when both fire. */
-static bool g_walking  = false;            /* currently driving start_actor? */
-static int  g_walk_dx  = 0, g_walk_dy = 0; /* last commanded d-pad direction */
+/* --- Input: the DECIDED model (exult-input-model / exult-sdl3-shim). ---------
+ * The cart IS our exult.cc, so frame() (below) runs Exult's NATIVE event-driven
+ * input by MIRRORING exult.cc Handle_events/Handle_event over PUBLIC engine APIs,
+ * fed by the SYNTHETIC SDL events compat/SDL_cron.cc builds from cron_pad/mouse
+ * — NOT a bespoke cart shortcut (the prior start_actor handle_input is gone), and
+ * NO fork patch (fork-patch-policy). This slice = MOVEMENT: the d-pad arrives as
+ * the SDL_Gamepad LEFT stick (-> joy_aim, mirroring Handle_event's
+ * GAMEPAD_AXIS_MOTION) and the RIGHT mouse button walks toward the cursor
+ * (mirroring Handle_events' RMASK continuation). Action buttons (keybinder),
+ * gump clicks and the OSK are the next slices — their events are drained here for
+ * now. NOTE: the engine cursor (Mouse::mouse()) isn't created in the probe yet
+ * (needs pointers.shp — its own slice), so the cursor POSITION comes from
+ * SDL_GetMouseState (the shim backs it), not Mouse::mouse()->get_mousex(). */
+static int   joy_aim_x = 0, joy_aim_y = 0;     /* mirrors exult.cc statics */
+static float joy_speed_factor = (float)Mouse::medium_speed_factor;
+static bool  g_walking = false;                /* issuing start_actor last frame? */
 
-static void handle_input(Game_window* gwin) {
-    const bool can_act = gwin->get_main_actor() && gwin->main_actor_can_act_charmed();
-
-    int mx = 0, my = 0;
-    const uint32_t mb         = cron_mouse(&mx, &my);
-    const bool     mouse_walk = (mb & 2u) != 0;   /* bit value 2 = right button */
-
-    const uint32_t pad = cron_pad(0);
-    int dx = 0, dy = 0;
-    if (pad & CRON_BTN_LEFT)  --dx;
-    if (pad & CRON_BTN_RIGHT) ++dx;
-    if (pad & CRON_BTN_UP)    --dy;
-    if (pad & CRON_BTN_DOWN)  ++dy;
-
-    if (mouse_walk && can_act) {
-        if (!gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
-            gwin->start_actor(mx, my, 125 /* medium step delay (ms) */);
-        }
-        g_walking = true;
-    } else if ((dx || dy) && can_act) {
-        const bool dir_changed = (dx != g_walk_dx || dy != g_walk_dy);
-        if (dir_changed || !gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
-            const int aim = 50;   /* window-centre-relative aim, matches Exult */
-            gwin->start_actor(gwin->get_width()  / 2 + dx * aim,
-                              gwin->get_height() / 2 + dy * aim, 125);
-        }
-        g_walking = true;
-    } else if (g_walking) {   /* both released -> stop */
-        if (gwin->is_moving()) {
-            gwin->stop_actor();
-        }
-        g_walking = false;
+/* Mirror of exult.cc Handle_event's GAMEPAD_AXIS_MOTION case (the only event this
+ * movement slice acts on; everything else is consumed). */
+static void handle_event_cart(Game_window* gwin, const SDL_Event& e) {
+    if (e.type != SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+        return;    /* mouse / key events: drained now, handled in later slices */
     }
-    g_walk_dx = dx;
-    g_walk_dy = dy;
+    if (e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTX && e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTY) {
+        return;
+    }
+    if (!gwin->get_main_actor() || !gwin->main_actor_can_act_charmed()) {
+        return;
+    }
+    SDL_Gamepad* dev = SDL_GetGamepadFromID(e.gaxis.which);
+    if (!dev) {
+        return;
+    }
+    float ax = SDL_GetGamepadAxis(dev, SDL_GAMEPAD_AXIS_LEFTX) / (float)SDL_JOYSTICK_AXIS_MAX;
+    float ay = SDL_GetGamepadAxis(dev, SDL_GAMEPAD_AXIS_LEFTY) / (float)SDL_JOYSTICK_AXIS_MAX;
+    /* Same deadzone/speed-tier logic as exult.cc, but comparing SQUARED
+     * magnitudes so we avoid sqrtf/fabsf — those are extern libm calls the VM
+     * module doesn't define (the d-pad is always full-scale anyway). */
+    constexpr float dead = 0.25f, medium = 0.60f, fast = 0.90f;
+    if (ax * ax <= dead * dead) ax = 0;     /* |ax| <= dead */
+    if (ay * ay <= dead * dead) ay = 0;
+    const float len2 = ax * ax + ay * ay;
+    joy_speed_factor = (float)Mouse::fast_speed_factor;
+    if (len2 < medium * medium)    joy_speed_factor = (float)Mouse::slow_speed_factor;
+    else if (len2 < fast * fast)   joy_speed_factor = (float)Mouse::medium_speed_factor;
+    if (ax == 0 && ay == 0) {
+        gwin->stop_actor();
+        joy_aim_x = joy_aim_y = 0;
+    } else {
+        const float aim = 50.f;             /* ax/ay are 0 or +/-1, so exact */
+        joy_aim_x = gwin->get_width()  / 2 + (int)(aim * ax);
+        joy_aim_y = gwin->get_height() / 2 + (int)(aim * ay);
+    }
+}
+
+/* Mirror of exult.cc Handle_events' per-frame body: pump the synthetic events,
+ * dispatch each, then apply the movement continuation (RMASK mouse-walk +
+ * joy_aim). */
+static void run_input(Game_window* gwin) {
+    SDL_PumpEvents();                        /* build this frame's events */
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        handle_event_cart(gwin, e);
+    }
+
+    const bool can_act = gwin->get_main_actor() && gwin->main_actor_can_act_charmed();
+    bool       walking = false;
+    if (can_act) {
+        float  fx = 0, fy = 0;
+        Uint32 ms = SDL_GetMouseState(&fx, &fy);
+        if (ms & SDL_BUTTON_RMASK) {         /* right-button walk toward the cursor */
+            if (!gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
+                const int spd = Mouse::mouse() ? Mouse::mouse()->avatar_speed : 125;
+                gwin->start_actor((int)fx, (int)fy, spd);
+            }
+            walking = true;
+        }
+        if (joy_aim_x != 0 || joy_aim_y != 0) {
+            const int speed = 200 * gwin->get_std_delay() / (int)joy_speed_factor;
+            gwin->start_actor(joy_aim_x, joy_aim_y, speed);
+            walking = true;
+        }
+    }
+    if (!walking && g_walking && gwin->is_moving()) {
+        gwin->stop_actor();
+    }
+    g_walking = walking;
 }
 
 /* Live per-frame game loop. Mirrors the core of exult.cc Handle_events() (minus
@@ -194,7 +233,7 @@ void frame(void) {
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
 
-    handle_input(gwin);                      // d-pad -> Avatar movement
+    run_input(gwin);                         // native event dispatch (pad+mouse)
 
     gwin->get_tqueue()->activate(ticks);     // advance animation / NPC schedules
     gwin->get_gump_man()->update_gumps();    // auto-repeat for held gump arrows
