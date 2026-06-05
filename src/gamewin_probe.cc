@@ -127,8 +127,43 @@ void setup(void) {
     cron_exit(0);
 }
 
+/* --- Input: drive the Avatar from the Cronopio d-pad. -----------------------
+ * Mirrors exult.cc's gamepad path (the SDL_EVENT_GAMEPAD_AXIS_MOTION handler +
+ * the Handle_events start_actor call) but reads the pad and calls the engine's
+ * PUBLIC movement API directly, cart-side — no exult.cc, no fork patch
+ * (fork-patch-policy). A held d-pad direction aims a point 50px from the window
+ * centre (where the Avatar is drawn) and start_actor() walks there; releasing
+ * stops. Re-issued on direction change or when a single-tile step completes,
+ * exactly like Handle_events' `!is_moving() || step_tile_delta==1` guard. */
+static int g_walk_dx = 0, g_walk_dy = 0;   /* last commanded d-pad direction */
+
+static void handle_input(Game_window* gwin) {
+    const uint32_t pad = cron_pad(0);
+    int dx = 0, dy = 0;
+    if (pad & CRON_BTN_LEFT)  --dx;
+    if (pad & CRON_BTN_RIGHT) ++dx;
+    if (pad & CRON_BTN_UP)    --dy;
+    if (pad & CRON_BTN_DOWN)  ++dy;
+
+    if ((dx || dy) && gwin->get_main_actor() && gwin->main_actor_can_act_charmed()) {
+        const bool dir_changed = (dx != g_walk_dx || dy != g_walk_dy);
+        if (dir_changed || !gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
+            const int aim  = 50;   /* window-centre-relative aim, matches Exult */
+            const int aimx = gwin->get_width()  / 2 + dx * aim;
+            const int aimy = gwin->get_height() / 2 + dy * aim;
+            gwin->start_actor(aimx, aimy, 125 /* medium step delay (ms) */);
+        }
+    } else if (g_walk_dx || g_walk_dy) {   /* direction released -> stop */
+        if (gwin->is_moving()) {
+            gwin->stop_actor();
+        }
+    }
+    g_walk_dx = dx;
+    g_walk_dy = dy;
+}
+
 /* Live per-frame game loop. Mirrors the core of exult.cc Handle_events() (minus
- * input / mouse / lerp, which are later slices): advance the clock, run the time
+ * mouse / lerp, which are later slices): read input, advance the clock, run the time
  * queue (terrain animation, NPC schedules, usecode), update gumps, repaint the
  * dirty regions, and cycle the palette. The host ms clock (SDL_GetTicks) advances
  * ~16 ms per cart frame in headless / real wall-clock on desktop, so the world
@@ -142,6 +177,8 @@ void frame(void) {
 
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
+
+    handle_input(gwin);                      // d-pad -> Avatar movement
 
     gwin->get_tqueue()->activate(ticks);     // advance animation / NPC schedules
     gwin->get_gump_man()->update_gumps();    // auto-repeat for held gump arrows
