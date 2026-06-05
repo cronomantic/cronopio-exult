@@ -127,17 +127,27 @@ void setup(void) {
     cron_exit(0);
 }
 
-/* --- Input: drive the Avatar from the Cronopio d-pad. -----------------------
- * Mirrors exult.cc's gamepad path (the SDL_EVENT_GAMEPAD_AXIS_MOTION handler +
- * the Handle_events start_actor call) but reads the pad and calls the engine's
- * PUBLIC movement API directly, cart-side — no exult.cc, no fork patch
- * (fork-patch-policy). A held d-pad direction aims a point 50px from the window
- * centre (where the Avatar is drawn) and start_actor() walks there; releasing
- * stops. Re-issued on direction change or when a single-tile step completes,
- * exactly like Handle_events' `!is_moving() || step_tile_delta==1` guard. */
-static int g_walk_dx = 0, g_walk_dy = 0;   /* last commanded d-pad direction */
+/* --- Input: drive the Avatar from the Cronopio mouse + d-pad. ---------------
+ * Both controls map to Game_window's PUBLIC start_actor()/stop_actor(), called
+ * directly cart-side — no exult.cc, no fork patch (fork-patch-policy):
+ *   - MOUSE (U7-native): hold the RIGHT button to walk toward the cursor.
+ *     cron_mouse's position is already in window coords (vid_present blits the
+ *     framebuffer top-left, unscaled), so it feeds start_actor directly. Mirrors
+ *     exult.cc Handle_events' RMASK path (re-issued each frame the button held).
+ *   - D-PAD: a held direction aims a point 50px from the window centre (where
+ *     the Avatar is drawn). Mirrors the SDL_EVENT_GAMEPAD_AXIS_MOTION handler.
+ * The single-tile / direction-change re-issue guard matches Handle_events'
+ * `!is_moving() || step_tile_delta==1`. Mouse takes priority when both fire. */
+static bool g_walking  = false;            /* currently driving start_actor? */
+static int  g_walk_dx  = 0, g_walk_dy = 0; /* last commanded d-pad direction */
 
 static void handle_input(Game_window* gwin) {
+    const bool can_act = gwin->get_main_actor() && gwin->main_actor_can_act_charmed();
+
+    int mx = 0, my = 0;
+    const uint32_t mb         = cron_mouse(&mx, &my);
+    const bool     mouse_walk = (mb & 2u) != 0;   /* bit value 2 = right button */
+
     const uint32_t pad = cron_pad(0);
     int dx = 0, dy = 0;
     if (pad & CRON_BTN_LEFT)  --dx;
@@ -145,18 +155,24 @@ static void handle_input(Game_window* gwin) {
     if (pad & CRON_BTN_UP)    --dy;
     if (pad & CRON_BTN_DOWN)  ++dy;
 
-    if ((dx || dy) && gwin->get_main_actor() && gwin->main_actor_can_act_charmed()) {
+    if (mouse_walk && can_act) {
+        if (!gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
+            gwin->start_actor(mx, my, 125 /* medium step delay (ms) */);
+        }
+        g_walking = true;
+    } else if ((dx || dy) && can_act) {
         const bool dir_changed = (dx != g_walk_dx || dy != g_walk_dy);
         if (dir_changed || !gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
-            const int aim  = 50;   /* window-centre-relative aim, matches Exult */
-            const int aimx = gwin->get_width()  / 2 + dx * aim;
-            const int aimy = gwin->get_height() / 2 + dy * aim;
-            gwin->start_actor(aimx, aimy, 125 /* medium step delay (ms) */);
+            const int aim = 50;   /* window-centre-relative aim, matches Exult */
+            gwin->start_actor(gwin->get_width()  / 2 + dx * aim,
+                              gwin->get_height() / 2 + dy * aim, 125);
         }
-    } else if (g_walk_dx || g_walk_dy) {   /* direction released -> stop */
+        g_walking = true;
+    } else if (g_walking) {   /* both released -> stop */
         if (gwin->is_moving()) {
             gwin->stop_actor();
         }
+        g_walking = false;
     }
     g_walk_dx = dx;
     g_walk_dy = dy;
