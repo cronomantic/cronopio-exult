@@ -183,18 +183,13 @@ void Pentagram::AudioMixer::stopSample(sint32) {}
 /* ---- SoundTester ------------------------------------------------------- */
 void SoundTester::test_sound() {}
 
-/* ---- KeyBinder (keys.cc, excluded — input is a later slice) ------------ */
-KeyBinder::KeyBinder() {}
-void KeyBinder::LoadDefaults() {}
-void KeyBinder::LoadFromFile(const char*) {}
-void KeyBinder::LoadFromPatch() {}
-void KeyBinder::ShowBrowserKeys() const {}
-ActionFunc GetExultAction(const std::string&) { return nullptr; }
-/* keyactions.cc action handlers (ActionFunc = void(*)(const int*)); only the
- * ones DIRECTLY called (not just table-registered) need a body. */
-void ActionFileGump(const int*) {}
+/* ---- KeyBinder + keyactions.cc are now COMPILED (input slice) ----------- *
+ * keys.cc (KeyBinder ctor/LoadDefaults/LoadFromFile/LoadFromPatch/ShowBrowserKeys
+ * /GetExultAction) and keyactions.cc (the Action* handlers, incl. ActionFileGump)
+ * are in gw.sh's TU set, so their former inert stubs are gone. The `keybinder`
+ * global (exult.cc) is still defined above. */
 
-/* ---- keys.cc / imagewin save_screenshot.cc (excluded) ------------------ */
+/* ---- imagewin save_screenshot.cc (excluded) --------------------------- */
 bool Translate_keyboard(const SDL_Event&, SDL_Keycode&, SDL_Keycode&, bool) { return false; }
 bool SaveIMG_RW(SDL_Surface*, SDL_IOStream*, bool, int) { return false; }
 
@@ -204,10 +199,16 @@ void make_screenshot(bool) {}
 void Wait_for_arrival(Actor*, const Tile_coord&, long) {}
 void Wizard_eye(long) {}
 void setup_video(bool, int, int, int, int, int, int, int, Image_window::FillMode, int) {}
+/* keyactions.cc display-control actions (no-ops on Cronopio: fixed 320x200 8bpp,
+ * no scaler/gamma/video reconfig — the present is fixed to CRON_FB). */
+void increase_scaleval() {}
+void decrease_scaleval() {}
+void change_gamma(bool) {}
 
 /* ---- version.cc (excluded — VERSION quoting) --------------------------- */
 void             getVersionInfo(std::ostream&) {}
 std::string_view VersionGetGitRevision(bool) { return {}; }
+std::string      VersionGetGitInfo(bool) { return {}; }   /* keyactions ActionAbout */
 
 /* ---- playscene.cc (flic intro, excluded) ------------------------------- */
 bool scene_available(const std::string&) { return false; }

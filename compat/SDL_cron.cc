@@ -360,6 +360,35 @@ void SDL_PumpEvents(void) {
         e.gaxis.value = ay;
         evq_push(&e);
     }
+
+    /* ---- face buttons -> synthetic key events (action slice) ----
+     * Map each pad face button to the KEYCODE of an Exult default action
+     * binding (data/bg/defaultkeys.txt: a single-letter binding lowercases to
+     * its ASCII keycode, mod=NONE). The cart dispatches these to the engine's
+     * native keybinder (gump_man->handle_kbd_event then keybinder->HandleEvent),
+     * so the pad reaches the full action set with no per-action cart code.
+     * D-pad bits are the movement stick (above), so only the face buttons map. */
+    static const struct { uint32_t btn; SDL_Keycode key; } KEYMAP[] = {
+        { CRON_BTN_A,     (SDL_Keycode)'i' },   /* inventory      */
+        { CRON_BTN_B,     (SDL_Keycode)'c' },   /* toggle_combat  */
+        { CRON_BTN_X,     (SDL_Keycode)'t' },   /* target_mode (attack) */
+        { CRON_BTN_Y,     (SDL_Keycode)'z' },   /* stats          */
+        { CRON_BTN_R,     (SDL_Keycode)'r' },   /* face_stats     */
+        { CRON_BTN_START, SDLK_ESCAPE       },  /* close_or_menu  */
+    };
+    uint32_t pdown = pad & ~g_prev_pad;   /* newly pressed this frame  */
+    uint32_t pup   = g_prev_pad & ~pad;   /* newly released this frame */
+    for (unsigned i = 0; i < sizeof KEYMAP / sizeof KEYMAP[0]; ++i) {
+        uint32_t b = KEYMAP[i].btn;
+        if (!((pdown | pup) & b)) continue;
+        SDL_Event e; std::memset(&e, 0, sizeof e);
+        e.type      = (pdown & b) ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        e.key.key   = KEYMAP[i].key;
+        e.key.mod   = 0;                  /* SDL_KMOD_NONE (unmodified binding) */
+        e.key.down  = (pdown & b) != 0;
+        e.key.repeat = false;
+        evq_push(&e);
+    }
     g_prev_pad = pad;
 }
 

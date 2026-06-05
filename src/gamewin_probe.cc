@@ -31,7 +31,10 @@
 #include "tqueue.h"        /* Time_queue::activate (per-frame world advance) */
 #include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps */
 #include "mouse.h"         /* Mouse::*_speed_factor (static), Mouse::mouse() */
+#include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
+
+extern KeyBinder* keybinder;   /* created + LoadDefaults() in Game_window::init_files */
 
 #include <cstdio>
 #include <exception>
@@ -147,9 +150,22 @@ static bool  g_walking = false;                /* issuing start_actor last frame
 
 /* Mirror of exult.cc Handle_event's GAMEPAD_AXIS_MOTION case (the only event this
  * movement slice acts on; everything else is consumed). */
-static void handle_event_cart(Game_window* gwin, const SDL_Event& e) {
-    if (e.type != SDL_EVENT_GAMEPAD_AXIS_MOTION) {
-        return;    /* mouse / key events: drained now, handled in later slices */
+static void handle_event_cart(Game_window* gwin, SDL_Event& e) {
+    switch (e.type) {
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        /* mirror exult.cc Handle_event: a gump holding keyboard focus gets first
+         * refusal, otherwise the native keybinder maps the key to its action
+         * (inventory / combat / target / stats / menu — the pad face buttons
+         * synthesise these keycodes; see compat/SDL_cron.cc KEYMAP). */
+        if (keybinder && !gwin->get_gump_man()->handle_kbd_event(&e)) {
+            keybinder->HandleEvent(e);
+        }
+        return;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        break;     /* the movement stick — handled below */
+    default:
+        return;    /* mouse / wheel: the movement continuation + later slices */
     }
     if (e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTX && e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTY) {
         return;
