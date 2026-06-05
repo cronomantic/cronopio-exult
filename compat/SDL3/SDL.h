@@ -78,6 +78,9 @@ extern SDL_bool SDL_GetRectEnclosingPoints(const SDL_Point* points, int count,
 /* hints — inert under Cronopio (SDL_SetHint is a no-op); the names the engine sets */
 extern SDL_bool    SDL_SetHint(const char* name, const char* value);
 extern const char* SDL_GetHint(const char* name);
+
+/* misc — inert: no external browser (OpenURL). */
+extern SDL_bool    SDL_OpenURL(const char* url);
 #define SDL_HINT_RETURN_KEY_HIDES_IME          "SDL_RETURN_KEY_HIDES_IME"
 #define SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES    "SDL_AUDIO_DEVICE_SAMPLE_FRAMES"
 #define SDL_HINT_AUDIO_DRIVER                  "SDL_AUDIO_DRIVER"
@@ -166,6 +169,7 @@ extern SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window* window);
 
 extern SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, const char* name);
 extern SDL_Renderer* SDL_GetRenderer(SDL_Window* window);
+extern const char*   SDL_GetRendererName(SDL_Renderer* renderer);
 extern void          SDL_DestroyRenderer(SDL_Renderer* renderer);
 extern SDL_bool      SDL_SetRenderVSync(SDL_Renderer* renderer, int vsync);
 extern SDL_bool      SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);

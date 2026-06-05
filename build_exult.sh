@@ -52,7 +52,12 @@ if [[ ! -f "$CRBUILD/build.ninja" ]]; then
     echo "[build] ERROR: cmake configure of Cronopio failed." >&2; exit 1; }
 fi
 echo "[build] syncing Cronopio tools + host with the current VM..."
-ninja -C "$CRBUILD" cronopio-cc cronopio cronopio-headless || {
+# cvm-translate/cvm-cc/cvm-dis MUST be in this list: a CronoVM submodule bump
+# does NOT rebuild the embedded _cvm tools on its own, so omitting them lets a
+# STALE translator silently reproduce already-fixed miscompiles (this cost a
+# multi-session bug hunt — see CronoVM docs/debugging.md).
+ninja -C "$CRBUILD" cronopio-cc cronopio cronopio-headless \
+                    cvm-translate cvm-cc cvm-dis || {
   echo "[build] ERROR: building Cronopio tools failed." >&2; exit 1; }
 
 # --- 2. C++ runtime libs: picolibc (+locale) and the libc++ iostream lib -----
@@ -113,8 +118,17 @@ STATIC_DIR="${1:-}"
 if [[ -n "$STATIC_DIR" ]]; then
   if [[ ! -d "$STATIC_DIR" ]]; then
     echo "[build] ERROR: STATIC_DIR '$STATIC_DIR' is not a directory." >&2; exit 1; fi
-  echo "[build] baking '$STATIC_DIR' -> build/exult.rom (read-only)..."
-  "$ROOT/build/exultpak.exe" "$STATIC_DIR" static "$ROOT/build/exult.rom" 2> "$ROOT/build/manifest.txt" || {
+  # Bake the user's read-only <STATIC> game tree AND Exult's own <DATA> extras
+  # (exult.flx + the BG gameflx exult_bg.flx, generated in §4b) into ONE ROM:
+  # <STATIC>/NAME -> "static/NAME", <DATA>/exult.flx -> "data/exult.flx", etc.
+  # (files_cron.cc maps <STATIC>-><"static">, <DATA>-><"data">.) The .flx are
+  # baked as single files (no staging copy of the big STATIC tree).
+  echo "[build] baking '$STATIC_DIR' (<STATIC>) + exult*.flx (<DATA>) -> build/exult.rom..."
+  "$ROOT/build/exultpak.exe" "$ROOT/build/exult.rom" \
+    "$STATIC_DIR" static \
+    "$EX/data/exult.flx" data \
+    "$EX/data/exult_bg.flx" data \
+    2> "$ROOT/build/manifest.txt" || {
     echo "[build] ERROR: exultpak bake failed." >&2; exit 1; }
   tail -1 "$ROOT/build/manifest.txt"
   ROM_ARG=(--rom="$ROOT/build/exult.rom")

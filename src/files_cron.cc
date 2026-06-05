@@ -24,6 +24,18 @@ int exult_files_init(void) {
     add_system_path("<PATCH>", "patch");
     add_system_path("<DATA>", "data");
 
+    /* Per-game keys that BaseGameInfo::setup_game_paths() CLONES into the active
+     * <STATIC>/<GAMEDAT>/<SAVEGAME>. The real GameManager registers these from
+     * the game scan; the gamewin probe bypasses GameManager, so register them
+     * here too — else clone_system_path() finds <BLACKGATE_STATIC> undefined and
+     * CLEARS <STATIC> (clone_system_path clears the dest when the src is
+     * undefined), breaking every <STATIC>/... content read (U7open_in then throws
+     * file_open_exception). Mirror the ROM prefixes. <BLACKGATE_PATCH>/_MODS stay
+     * undefined on purpose (no patch/mods) so setup_game_paths clears <PATCH>. */
+    add_system_path("<BLACKGATE_STATIC>", "static");
+    add_system_path("<BLACKGATE_GAMEDAT>", "gamedat");
+    add_system_path("<BLACKGATE_SAVEGAME>", "savegame");
+
     /* Reads: ROM (read-only game content) first, then the RAM-FS so files we
      * wrote (saves, gamedat) read back. romfs_open is case-insensitive, which
      * is what Exult expects for the DOS-uppercase content names. */

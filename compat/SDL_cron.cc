@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <cronopio.h> /* cron_time_ms — the host millisecond clock for SDL_GetTicks */
+
 /* ---- pixel-format details (only the formats the render path can name) ---- */
 static SDL_PixelFormatDetails g_fmt_index8 = {
         SDL_PIXELFORMAT_INDEX8, 8, 1, {0, 0}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -154,6 +156,18 @@ const char* SDL_GetError(void) {
     return "";
 }
 
+/* No external browser on Cronopio; report failure (callers tolerate it). */
+SDL_bool SDL_OpenURL(const char* url) {
+    (void)url;
+    return 0;
+}
+
+/* One fixed software renderer name (inert renderer path). */
+const char* SDL_GetRendererName(SDL_Renderer* renderer) {
+    (void)renderer;
+    return "cronopio";
+}
+
 void SDL_free(void* mem) {
     std::free(mem);
 }
@@ -200,3 +214,128 @@ SDL_bool SDL_GetClosestFullscreenDisplayMode(SDL_DisplayID, int, int, float, SDL
     if (closest) *closest = g_mode;
     return 1;
 }
+
+/* ---- timer / clock ------------------------------------------------------ *
+ * SDL_GetTicks rides Cronopio's host millisecond clock (cron_time_ms), but with
+ * a per-frame monotonic NUDGE so it strictly advances WITHIN a single cart
+ * frame. The host clock only ticks once per cart frame (headless bumps it ~16ms
+ * before each frame; desktop is real wall-clock). Some engine routines busy-wait
+ * on the clock inside one call — e.g. Palette::fade_out/in do
+ * `t=GetTicks()+20; while (t >= GetTicks());` — which would spin forever in a
+ * single frame if GetTicks() never changed. The nudge makes every call return a
+ * strictly larger value until the host clock advances (then it resets), so such
+ * busy-waits drain immediately (the cosmetic fade becomes instant) without
+ * blocking the frame, while real pacing across frames still follows cron_time_ms.
+ * SDL_Delay is a NO-OP (a cart must never block — see cart-no-blocking-input).
+ * SDL_AddTimer/RemoveTimer are inert (no callback scheduler yet). */
+Uint64 SDL_GetTicks(void) {
+    static uint32_t last_base = 0;
+    static uint32_t nudge     = 0;
+    uint32_t        base      = cron_time_ms();
+    if (base != last_base) {
+        last_base = base;
+        nudge     = 0;
+    } else {
+        ++nudge;
+    }
+    return (Uint64)base + nudge;
+}
+void   SDL_Delay(Uint32) {}
+SDL_TimerID SDL_AddTimer(Uint32, SDL_TimerCallback, void*) { return 0; }
+bool        SDL_RemoveTimer(SDL_TimerID) { return true; }
+
+/* ---- events / input query ----------------------------------------------- *
+ * INERT for now: no events are queued and all input-state queries report
+ * "nothing pressed". The synthetic input layer (pad/mouse -> SDL events + the
+ * OSK, see memory exult-input-model) plugs in HERE later; for Phase-1 frame
+ * bring-up the engine simply sees an idle keyboard/mouse. */
+bool   SDL_PollEvent(SDL_Event* event) { (void)event; return false; }
+bool   SDL_PushEvent(SDL_Event*) { return true; }
+void   SDL_PumpEvents(void) {}
+int    SDL_PeepEvents(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) { return 0; }
+Uint32 SDL_RegisterEvents(int numevents) {
+    /* Hand out a fresh user-event type range, starting at SDL_EVENT_USER. */
+    static Uint32 next = SDL_EVENT_USER;
+    Uint32        base = next;
+    if (numevents > 0) next += (Uint32)numevents;
+    return base;
+}
+
+SDL_Keymod   SDL_GetModState(void) { return 0; }
+const bool*  SDL_GetKeyboardState(int* numkeys) {
+    static bool keys[512] = {};   /* enough HID slots; all up */
+    if (numkeys) *numkeys = 512;
+    return keys;
+}
+SDL_MouseButtonFlags SDL_GetMouseState(float* x, float* y) {
+    if (x) *x = 0.0f;
+    if (y) *y = 0.0f;
+    return 0;
+}
+const char*  SDL_GetKeyName(SDL_Keycode) { return ""; }
+bool         SDL_StartTextInput(SDL_Window*) { return true; }
+bool         SDL_StopTextInput(SDL_Window*) { return true; }
+bool         SDL_TextInputActive(SDL_Window*) { return false; }
+SDL_Finger** SDL_GetTouchFingers(SDL_TouchID, int* count) {
+    if (count) *count = 0;
+    return nullptr;   /* no touch device on Cronopio */
+}
+
+/* ---- rect / hint / renderer glue ---------------------------------------- */
+/* Minimal enclosing rect of `points` (faithful), optionally clipped. */
+SDL_bool SDL_GetRectEnclosingPoints(const SDL_Point* points, int count,
+                                    const SDL_Rect* clip, SDL_Rect* result) {
+    if (!points || count < 1 || !result) {
+        return 0;
+    }
+    int minx = points[0].x, miny = points[0].y;
+    int maxx = points[0].x, maxy = points[0].y;
+    for (int i = 1; i < count; ++i) {
+        if (points[i].x < minx) minx = points[i].x;
+        if (points[i].y < miny) miny = points[i].y;
+        if (points[i].x > maxx) maxx = points[i].x;
+        if (points[i].y > maxy) maxy = points[i].y;
+    }
+    if (clip) {
+        int cx2 = clip->x + clip->w - 1;
+        int cy2 = clip->y + clip->h - 1;
+        if (minx < clip->x) minx = clip->x;
+        if (miny < clip->y) miny = clip->y;
+        if (maxx > cx2)     maxx = cx2;
+        if (maxy > cy2)     maxy = cy2;
+        if (minx > maxx || miny > maxy) {   /* fully clipped away */
+            *result = SDL_Rect{0, 0, 0, 0};
+            return 0;
+        }
+    }
+    *result = SDL_Rect{minx, miny, maxx - minx + 1, maxy - miny + 1};
+    return 1;
+}
+
+/* Hints are inert under Cronopio (no SDL backends to steer). */
+SDL_bool SDL_SetHint(const char*, const char*) { return 1; }
+
+/* A surface that BORROWS the caller's pixels (SDL_CreateSurfaceFrom does not
+ * own them). NOTE: SDL_DestroySurface here frees surface->pixels — only call it
+ * on owned surfaces; these borrowed ones live on the inert render path (the
+ * cart presents the engine's own buffer to CRON_FB) and are not destroyed. */
+SDL_Surface* SDL_CreateSurfaceFrom(int width, int height, SDL_PixelFormat format,
+                                   void* pixels, int pitch) {
+    SDL_Surface* s = (SDL_Surface*)std::calloc(1, sizeof(SDL_Surface));
+    if (!s) {
+        return nullptr;
+    }
+    s->format   = format;
+    s->w        = width;
+    s->h        = height;
+    s->pitch    = pitch;
+    s->pixels   = pixels;
+    s->refcount = 1;
+    s->palette  = nullptr;
+    return s;
+}
+
+/* Inert renderer path: Cronopio presents straight to CRON_FB. */
+SDL_Renderer* SDL_GetRenderer(SDL_Window*) { return nullptr; }
+/* Cronopio's framebuffer is 1:1 — render coords already equal event coords. */
+SDL_bool SDL_ConvertEventToRenderCoordinates(SDL_Renderer*, SDL_Event*) { return 1; }

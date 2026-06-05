@@ -5,10 +5,15 @@
  * Format-agnostic: it stores raw bytes for ANY file (FLEX/VGA/u7map/usecode/.dat
  * alike) — the Exult engine inside the cart parses formats, not this tool.
  *
- * Usage:  exultpak <src-dir> <mount-prefix> <out.rom>
- *   e.g.  exultpak "E:/JuegosW/Ultima 7/STATIC" static exult.rom
- *   -> every file under src-dir is keyed as "<prefix>/<relpath>" (forward
- *      slashes, original case; lookup in the cart is case-insensitive).
+ * Usage:  exultpak <out.rom> <src> <mount-prefix> [<src> <mount-prefix> ...]
+ *   e.g.  exultpak exult.rom "E:/JuegosW/Ultima 7/STATIC" static \
+ *                            "third_party/exult/data/exult.flx" data
+ *   -> one or more (src, prefix) MOUNTS are merged into a single archive. A
+ *      <src> may be a DIRECTORY (every file under it is keyed "<prefix>/<relpath>",
+ *      recursive) OR a single FILE (keyed "<prefix>/<filename>"). Forward slashes,
+ *      original case; lookup in the cart is case-insensitive. This lets the user's
+ *      read-only <STATIC> game tree and Exult's own <DATA> extras (exult*.flx) live
+ *      side by side in one ROM without copying the big STATIC tree to a staging dir.
  *
  * Prints a manifest line per file (path / length / FNV-1a) so a cart read-back
  * can be verified byte-exact. READS the source tree only; never writes into it.
@@ -38,34 +43,48 @@ static void put_u32(std::vector<uint8_t> &v, uint32_t x) {
     v.push_back((uint8_t)(x >> 16)); v.push_back((uint8_t)(x >> 24));
 }
 
+// Read one regular file into `items` under key. Returns false on read error.
+static bool add_file(std::vector<Item> &items, const fs::path &p, std::string key) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) { std::fprintf(stderr, "exultpak: cannot read %s\n", key.c_str()); return false; }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    items.push_back(Item{ std::move(key), std::move(bytes) });
+    return true;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        std::fprintf(stderr, "usage: exultpak <src-dir> <mount-prefix> <out.rom>\n");
+    // argv[1] = out.rom, then (src, prefix) pairs.
+    if (argc < 4 || ((argc - 2) % 2) != 0) {
+        std::fprintf(stderr,
+            "usage: exultpak <out.rom> <src> <mount-prefix> [<src> <mount-prefix> ...]\n");
         return 2;
     }
-    fs::path src = argv[1];
-    std::string prefix = argv[2];
-    fs::path out = argv[3];
-
-    if (!fs::is_directory(src)) {
-        std::fprintf(stderr, "exultpak: '%s' is not a directory\n", argv[1]);
-        return 1;
-    }
-    // strip trailing slash on prefix
-    while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
-        prefix.pop_back();
+    fs::path out = argv[1];
 
     std::vector<Item> items;
-    for (auto &de : fs::recursive_directory_iterator(src)) {
-        if (!de.is_regular_file()) continue;
-        std::string rel = fs::relative(de.path(), src).generic_string(); // '/' sep
-        std::string key = prefix.empty() ? rel : prefix + "/" + rel;
+    for (int a = 2; a + 1 < argc; a += 2) {
+        fs::path    src    = argv[a];
+        std::string prefix = argv[a + 1];
+        // strip trailing slash on prefix
+        while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
+            prefix.pop_back();
 
-        std::ifstream f(de.path(), std::ios::binary);
-        if (!f) { std::fprintf(stderr, "exultpak: cannot read %s\n", key.c_str()); return 1; }
-        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
-                                    std::istreambuf_iterator<char>());
-        items.push_back(Item{ std::move(key), std::move(bytes) });
+        if (fs::is_directory(src)) {
+            for (auto &de : fs::recursive_directory_iterator(src)) {
+                if (!de.is_regular_file()) continue;
+                std::string rel = fs::relative(de.path(), src).generic_string(); // '/' sep
+                std::string key = prefix.empty() ? rel : prefix + "/" + rel;
+                if (!add_file(items, de.path(), std::move(key))) return 1;
+            }
+        } else if (fs::is_regular_file(src)) {
+            std::string name = src.filename().generic_string();
+            std::string key  = prefix.empty() ? name : prefix + "/" + name;
+            if (!add_file(items, src, std::move(key))) return 1;
+        } else {
+            std::fprintf(stderr, "exultpak: '%s' is not a file or directory\n", argv[a]);
+            return 1;
+        }
     }
     std::sort(items.begin(), items.end(),
               [](const Item &a, const Item &b) { return a.key < b.key; });
@@ -113,7 +132,7 @@ int main(int argc, char **argv) {
         blob.insert(blob.end(), it.bytes.begin(), it.bytes.end());
 
     std::ofstream of(out, std::ios::binary);
-    if (!of) { std::fprintf(stderr, "exultpak: cannot write %s\n", argv[3]); return 1; }
+    if (!of) { std::fprintf(stderr, "exultpak: cannot write %s\n", argv[1]); return 1; }
     of.write((const char *)blob.data(), (std::streamsize)blob.size());
     of.close();
 
@@ -123,6 +142,6 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "PACKED %-28s len=%-9u fnv=%08x\n",
                      items[i].key.c_str(), (uint32_t)items[i].bytes.size(), fnv);
     }
-    std::fprintf(stderr, "exultpak: %u files, %u bytes -> %s\n", count, total, argv[3]);
+    std::fprintf(stderr, "exultpak: %u files, %u bytes -> %s\n", count, total, argv[1]);
     return 0;
 }

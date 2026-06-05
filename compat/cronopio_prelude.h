@@ -17,4 +17,12 @@
 #	include <cctype> /* std::tolower/std::toupper — istring.h assumes it */
 #endif
 
+/* Build-config the upstream CMake normally injects on the compile line. We define
+ * it here (not via cvm-cc -D) because the cvm-cc->clang arg relay drops the inner
+ * quotes of a -DVERSION="..." on Windows, mangling the string literal. version.cc/
+ * items.cc stream VERSION as a string. Keep in sync with the engine's release tag. */
+#ifndef VERSION
+#	define VERSION "1.13.0cronopio"
+#endif
+
 #endif /* CRONOPIO_PRELUDE_H */
