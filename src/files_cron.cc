@@ -48,6 +48,19 @@ int exult_files_init(void) {
     U7set_istream_factory(
             [](const char* s, std::ios_base::openmode mode)
                     -> std::unique_ptr<std::istream> {
+                /* A path still carrying an UNEXPANDED <KEY> token (leading '<') means
+                 * get_system_path() left it literal because that system path is
+                 * CLEARED/undefined — e.g. <PATCH> on a no-patch Black Gate. Such a
+                 * file can never exist, yet Exult's text renderer probes
+                 * <PATCH>/<font>.vga on EVERY text draw (~8x/frame, measured by
+                 * logging this factory). The old path did a 274-entry romfs scan +
+                 * built a doomed std::ifstream (libc++ filebuf+locale) per probe.
+                 * Bail cheaply: real ROM/RAM paths never start with '<', so this can't
+                 * hide a real file. U7open_in treats null exactly like the old failed
+                 * stream (retries upper-case, then throws). */
+                if (!s || s[0] == '<') {
+                    return nullptr;
+                }
                 if (auto in = romfs_open(s)) {
                     return in;
                 }
