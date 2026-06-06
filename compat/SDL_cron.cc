@@ -226,8 +226,14 @@ SDL_bool SDL_GetClosestFullscreenDisplayMode(SDL_DisplayID, int, int, float, SDL
  * strictly larger value until the host clock advances (then it resets), so such
  * busy-waits drain immediately (the cosmetic fade becomes instant) without
  * blocking the frame, while real pacing across frames still follows cron_time_ms.
- * SDL_Delay is a NO-OP (a cart must never block — see cart-no-blocking-input).
+ * SDL_Delay YIELDS the engine coroutine to the host (a cart must never block —
+ * see cart-no-blocking-input). Exult's blocking loops (do_modal_gump, fades, the
+ * naming screen) call Delay() (gump_utils.h) as their per-iteration wait; routing
+ * that to the cart's coroutine yield (exult_engine_yield, defined in the cart)
+ * lets those loops advance one host frame per Delay() — and present their buffer —
+ * instead of hanging. No-op off the engine coroutine (e.g. during setup()).
  * SDL_AddTimer/RemoveTimer are inert (no callback scheduler yet). */
+extern "C" void exult_engine_yield(void);   /* defined in src/gamewin_probe.cc */
 Uint64 SDL_GetTicks(void) {
     static uint32_t last_base = 0;
     static uint32_t nudge     = 0;
@@ -240,7 +246,7 @@ Uint64 SDL_GetTicks(void) {
     }
     return (Uint64)base + nudge;
 }
-void   SDL_Delay(Uint32) {}
+void   SDL_Delay(Uint32) { exult_engine_yield(); }
 SDL_TimerID SDL_AddTimer(Uint32, SDL_TimerCallback, void*) { return 0; }
 bool        SDL_RemoveTimer(SDL_TimerID) { return true; }
 

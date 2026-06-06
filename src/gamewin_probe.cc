@@ -29,9 +29,10 @@
 #include "iwin8.h"         /* Image_window8 / Image_buffer8 (present) */
 #include "vid_cron.h"      /* vid_present -> CRON_FB */
 #include "tqueue.h"        /* Time_queue::activate (per-frame world advance) */
-#include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps / find_gump */
+#include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps / find_gump / do_modal_gump */
 #include "gumps/Gump.h"          /* Gump::on_button (gump-button hit test) */
 #include "gumps/Gump_button.h"   /* Gump_button::is_checkmark */
+#include "gumps/Newfile_gump.h"  /* save/load modal — a text-input consumer (OSK target) */
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
@@ -414,6 +415,22 @@ static void run_input(Game_window* gwin) {
 static void engine_tick(Game_window* gwin) {
     Mouse* cursor = Mouse::mouse();
 
+    /* TEMP verification trigger (strip after the OSK slice): pad SELECT opens the
+     * SAVE gump (Newfile_gump) via Exult's REAL do_modal_gump — now reachable
+     * because SDL_Delay yields the coroutine (the modal's blocking loop advances
+     * one host frame per Delay() instead of hanging). Proves blocking modal UI +
+     * a text-input consumer work cart-side; the OSK will feed its name field. */
+    {
+        static uint32_t s_prev_modal_pad = 0;
+        const uint32_t  pad = cron_pad(0);
+        if ((pad & CRON_BTN_SELECT) && !(s_prev_modal_pad & CRON_BTN_SELECT)) {
+            Newfile_gump* sg = new Newfile_gump();
+            gwin->get_gump_man()->do_modal_gump(sg, Mouse::hand);
+            delete sg;
+        }
+        s_prev_modal_pad = pad;
+    }
+
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
 
@@ -440,21 +457,36 @@ static void engine_tick(Game_window* gwin) {
     }
 
     gwin->rotatecolours();                   // water/lava palette cycling
-
-    Image_window8* w  = gwin->get_win();
-    Image_buffer8* ib = w->get_ib8();
-    vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
-                (int)ib->get_line_width(), w->get_palette());
 }
 
-/* The engine coroutine: run the live loop forever, yielding to the host once per
- * iteration. Runs on its own stack (set up in setup()). Yielding here is the same
- * yield point Exult's blocking loops will reach via SDL_Delay (next slice), so the
+/* Present the engine's 8bpp buffer to CRON_FB, then yield the coroutine to the
+ * host (one host frame). Called (a) by engine_loop after each tick, and (b) by the
+ * SDL shim's SDL_Delay — so Exult's BLOCKING loops (do_modal_gump, fades, the
+ * naming screen) that paint into the buffer but call the INERT gwin->show() still
+ * reach the screen AND advance one host frame per Delay() instead of hanging.
+ * No-op off the coroutine (status != RUNNING) so setup()-time waits keep using the
+ * SDL_GetTicks nudge and don't try to yield a non-running coroutine. */
+extern "C" void exult_engine_yield(void) {
+    if (!g_engine_ready || g_engine.status != CORO_RUNNING) {
+        return;
+    }
+    if (g_gwin) {
+        Image_window8* w  = g_gwin->get_win();
+        Image_buffer8* ib = w->get_ib8();
+        vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
+                    (int)ib->get_line_width(), w->get_palette());
+    }
+    cron_coro_yield(&g_engine);              // -> host frame() (one host frame)
+}
+
+/* The engine coroutine: run the live loop forever, presenting + yielding once per
+ * iteration. Runs on its own stack (set up in setup()). The yield goes through the
+ * same exult_engine_yield that Exult's blocking loops reach via SDL_Delay, so the
  * loop body and a nested do_modal_gump both advance one host frame per turn. */
 static void engine_loop(void*) {
     for (;;) {
         engine_tick(g_gwin);
-        cron_coro_yield(&g_engine);          // -> host frame() (one host frame)
+        exult_engine_yield();                // present + yield to host
     }
 }
 
