@@ -32,7 +32,6 @@
 #include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps / find_gump / do_modal_gump */
 #include "gumps/Gump.h"          /* Gump::on_button (gump-button hit test) */
 #include "gumps/Gump_button.h"   /* Gump_button::is_checkmark */
-#include "gumps/Newfile_gump.h"  /* save/load modal — a text-input consumer (OSK target) */
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "shapevga.h"      /* Shape_manager::paint_text — draw the OSK glyphs */
@@ -228,12 +227,15 @@ static unsigned s_last_b1_click = 0;
  * RMASK walk meanwhile). Mirrors exult.cc's right_on_gump. */
 static bool     s_right_on_gump = false;
 
-/* OSK active flag — OWNED by the cart, set around a text-input modal (the save
- * gump's SDL_StartTextInput is touch-only and never fires here, so we drive the
- * OSK explicitly). The SDL shim reads exult_osk_active() to suppress the pad's
- * action-key synthesis while the OSK has the face buttons. */
+/* OSK active flag — recomputed each frame in exult_engine_yield = "a text-input
+ * field is being edited inside a modal". The SDL shim reads exult_osk_active() to
+ * suppress the pad action-key synthesis while the OSK owns the face buttons. */
 static bool g_osk_active = false;
 extern "C" int exult_osk_active(void) { return g_osk_active ? 1 : 0; }
+/* Text-input flag from the SDL shim: set by SDL_StartTextInput (the save gump via
+ * our TouchUI stub), force-clearable (Exult's gump dtor leaves it stale on close). */
+extern "C" int  exult_text_input_active(void);
+extern "C" void exult_text_input_set(int);
 
 /* Mirror of the cases of exult.cc Handle_event the cart drives so far: KEY_DOWN/UP
  * (keybinder actions — the pad face buttons), GAMEPAD_AXIS_MOTION (the movement
@@ -425,24 +427,6 @@ static void run_input(Game_window* gwin) {
 static void engine_tick(Game_window* gwin) {
     Mouse* cursor = Mouse::mouse();
 
-    /* TEMP verification trigger (strip after the OSK slice): pad SELECT opens the
-     * SAVE gump (Newfile_gump) via Exult's REAL do_modal_gump — now reachable
-     * because SDL_Delay yields the coroutine (the modal's blocking loop advances
-     * one host frame per Delay() instead of hanging). Proves blocking modal UI +
-     * a text-input consumer work cart-side; the OSK will feed its name field. */
-    {
-        static uint32_t s_prev_modal_pad = 0;
-        const uint32_t  pad = cron_pad(0);
-        if ((pad & CRON_BTN_SELECT) && !(s_prev_modal_pad & CRON_BTN_SELECT)) {
-            Newfile_gump* sg = new Newfile_gump();
-            g_osk_active = true;       /* OSK on for the duration of this text modal */
-            gwin->get_gump_man()->do_modal_gump(sg, Mouse::hand);
-            g_osk_active = false;
-            delete sg;
-        }
-        s_prev_modal_pad = pad;
-    }
-
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
 
@@ -598,8 +582,16 @@ extern "C" void exult_engine_yield(void) {
     }
     if (g_gwin) {
         /* OSK overlay: drawn here (the per-host-frame chokepoint) so it shows AND
-         * is driven even while a blocking do_modal_gump owns the loop. Drawn on top
-         * of whatever the engine last painted, just before the present. */
+         * is driven even while a blocking do_modal_gump owns the loop. It is active
+         * only while a text field is being EDITED in a modal — Exult starts text
+         * input (TouchUI stub -> SDL_StartTextInput) when an editable slot is picked;
+         * the modal_gump_mode() guard scopes it and clears the flag the gump dtor
+         * leaves stale once the modal closes. */
+        const bool modal = g_gwin->get_gump_man()->modal_gump_mode();
+        if (!modal && exult_text_input_active()) {
+            exult_text_input_set(0);
+        }
+        g_osk_active = modal && exult_text_input_active();
         if (g_osk_active) {
             osk_draw_and_drive(g_gwin);
         }

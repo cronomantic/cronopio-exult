@@ -381,13 +381,14 @@ void SDL_PumpEvents(void) {
      * SUPPRESSED while the OSK is active: then A/B/START drive the OSK (type/
      * backspace/enter) cart-side, so they must NOT also fire 'i'/'c'/Esc here. */
     if (exult_osk_active()) { g_prev_pad = pad; return; }
-    static const struct { uint32_t btn; SDL_Keycode key; } KEYMAP[] = {
-        { CRON_BTN_A,     (SDL_Keycode)'i' },   /* inventory      */
-        { CRON_BTN_B,     (SDL_Keycode)'c' },   /* toggle_combat  */
-        { CRON_BTN_X,     (SDL_Keycode)'t' },   /* target_mode (attack) */
-        { CRON_BTN_Y,     (SDL_Keycode)'z' },   /* stats          */
-        { CRON_BTN_R,     (SDL_Keycode)'r' },   /* face_stats     */
-        { CRON_BTN_START, SDLK_ESCAPE       },  /* close_or_menu  */
+    static const struct { uint32_t btn; SDL_Keycode key; SDL_Keymod mod; } KEYMAP[] = {
+        { CRON_BTN_A,      (SDL_Keycode)'i', SDL_KMOD_NONE },   /* inventory      */
+        { CRON_BTN_B,      (SDL_Keycode)'c', SDL_KMOD_NONE },   /* toggle_combat  */
+        { CRON_BTN_X,      (SDL_Keycode)'t', SDL_KMOD_NONE },   /* target_mode    */
+        { CRON_BTN_Y,      (SDL_Keycode)'z', SDL_KMOD_NONE },   /* stats          */
+        { CRON_BTN_R,      (SDL_Keycode)'r', SDL_KMOD_NONE },   /* face_stats     */
+        { CRON_BTN_START,  SDLK_ESCAPE,      SDL_KMOD_NONE },   /* close_or_menu  */
+        { CRON_BTN_SELECT, SDLK_S,           SDL_KMOD_NONE },   /* save_restore (defaultkeys "S": 1-letter key, lowercased, NO modifier) */
     };
     uint32_t pdown = pad & ~g_prev_pad;   /* newly pressed this frame  */
     uint32_t pup   = g_prev_pad & ~pad;   /* newly released this frame */
@@ -397,7 +398,7 @@ void SDL_PumpEvents(void) {
         SDL_Event e; std::memset(&e, 0, sizeof e);
         e.type      = (pdown & b) ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
         e.key.key   = KEYMAP[i].key;
-        e.key.mod   = 0;                  /* SDL_KMOD_NONE (unmodified binding) */
+        e.key.mod   = KEYMAP[i].mod;      /* SHIFT for the save_restore 'S' binding */
         e.key.down  = (pdown & b) != 0;
         e.key.repeat = false;
         evq_push(&e);
@@ -444,12 +445,18 @@ Sint16       SDL_GetGamepadAxis(SDL_Gamepad*, SDL_GamepadAxis axis) {
     return 0;
 }
 const char*  SDL_GetKeyName(SDL_Keycode) { return ""; }
-/* Cronopio has no keyboard; text entry is the cart's OSK (driven by the pad). The
- * engine's SDL text-input mode is only used by Exult's TOUCH path (touchui is null
- * here), so these are inert. The OSK's on/off is the cart-owned exult_osk_active(). */
-bool         SDL_StartTextInput(SDL_Window*) { return true; }
-bool         SDL_StopTextInput(SDL_Window*)  { return true; }
-bool         SDL_TextInputActive(SDL_Window*) { return false; }
+/* Cronopio has no keyboard; text entry is the cart's OSK. Exult starts SDL text
+ * input when an editable field is selected (Newfile_gump's save-name slot, via our
+ * TouchUI stub -> SDL_StartTextInput). The cart reads exult_text_input_active() and,
+ * combined with "a modal is open", shows the OSK ONLY while editing — and clears the
+ * flag (exult_text_input_set 0) when no modal is up, since Exult's gump dtor doesn't
+ * always Stop text input. */
+static bool g_text_input = false;
+bool         SDL_StartTextInput(SDL_Window*) { g_text_input = true;  return true; }
+bool         SDL_StopTextInput(SDL_Window*)  { g_text_input = false; return true; }
+bool         SDL_TextInputActive(SDL_Window*) { return g_text_input; }
+extern "C" int  exult_text_input_active(void) { return g_text_input ? 1 : 0; }
+extern "C" void exult_text_input_set(int v)   { g_text_input = (v != 0); }
 SDL_Finger** SDL_GetTouchFingers(SDL_TouchID, int* count) {
     if (count) *count = 0;
     return nullptr;   /* no touch device on Cronopio */

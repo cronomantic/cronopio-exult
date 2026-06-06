@@ -44,7 +44,25 @@ bool               combat_trace      = false;
 quitting_time_enum quitting_time     = QUIT_TIME_NO;
 ShortcutBar_gump*  g_shortcutBar     = nullptr;
 bool               g_waiting_for_click = false;
-TouchUI*           touchui           = nullptr;   /* no touch UI on Cronopio */
+/* A no-op concrete TouchUI so `touchui` is non-null: that makes Exult's gumps take
+ * their on-screen-keyboard path (Newfile_gump calls TouchUI::startTextInput when an
+ * editable field is selected), which we route to SDL_StartTextInput so the cart's
+ * OSK appears precisely while editing. All the touch *controls* are no-ops (Cronopio
+ * has no touch surface). See src/gamewin_probe.cc OSK + fork-patch-policy. */
+namespace {
+class CartTouchUI : public TouchUI {
+public:
+    void showGameControls() override {}
+    void hideGameControls() override {}
+    void showButtonControls() override {}
+    void hideButtonControls() override {}
+    void showPauseControls() override {}
+    void hidePauseControls() override {}
+    void onDpadLocationChanged() override {}
+};
+CartTouchUI g_cart_touchui;
+}    // namespace
+TouchUI*           touchui           = &g_cart_touchui;
 
 /* ---- audio subsystem (host-native in a later slice) --------------------- */
 Audio*             Audio::self       = nullptr;
@@ -54,10 +72,14 @@ Pentagram::AudioMixer* Pentagram::AudioMixer::the_audio_mixer = nullptr;
 
 /* ---- touchui.cc (excluded: needs SDL_PropertiesID) ---------------------- */
 uint32 TouchUI::eventType = 0;
-/* The three STATIC TouchUI entry points are called directly (behind a null
- * `touchui` check) from the engine; the pure-virtual members need no body. */
+/* touchui.cc's TouchUI() ctor is excluded -> stub it (TouchUI has no data members,
+ * so an empty body is complete) for the CartTouchUI instance above. */
+TouchUI::TouchUI() {}
+/* startTextInput is the OSK trigger: Newfile_gump calls it when an editable field is
+ * picked -> route to SDL_StartTextInput so the cart shows the OSK. The other two
+ * static entry points stay inert. */
 void TouchUI::onTextInput(const char*) {}
-void TouchUI::startTextInput(SDL_Window*) {}
+void TouchUI::startTextInput(SDL_Window* window) { SDL_StartTextInput(window); }
 void TouchUI::setTextInputArea(SDL_Window*, int, int, int, int) {}
 
 /* ---- gamemgr/modmgr.cc (excluded: its InstallModZip pulls files/zip + zlib,
