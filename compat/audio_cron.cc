@@ -287,8 +287,32 @@ static std::map<int, SfxPcm> g_sfx_cache;
 
 static int      g_voice_num[SFX_VOICES];   // SFX num on each voice (zero-init OK: a
 static uint32_t g_voice_end[SFX_VOICES];   //   voice with end<=now counts as idle)
+static int      g_voice_base[SFX_VOICES];  // base volume (pre-distance) for reposition
 static int      g_voice_rr = 0;
 static int      g_sfx_vol  = 100;          // 0..100 master
+
+// Distance attenuation. `distance` is 0..256 (Audio::get_2d_position_for_tile's
+// scale: 0 = at the listener, 256 = MAX_SOUND_FALLOFF away = silent). Linear.
+static int sfx_falloff(int base, int distance) {
+	if (distance <= 0) {
+		return base;
+	}
+	if (distance >= 256) {
+		return 0;
+	}
+	return base * (256 - distance) / 256;
+}
+
+static int clamp_pan(int balance) {
+	int pan = balance / 2;    // -256..256 -> -128..128
+	if (pan < -128) {
+		pan = -128;
+	}
+	if (pan > 127) {
+		pan = 127;
+	}
+	return pan;
+}
 
 static uint32_t rd_le(const uint8_t* p, int n) {
 	uint32_t v = 0;
@@ -370,24 +394,14 @@ int play_sfx(int num, int vol256, int balance, int repeat, int distance) {
 	if (!s) {
 		return -1;
 	}
-	int vol = vol256 * 255 / 256 * g_sfx_vol / 100;     // 0..256 -> 0..255, x master
-	if (distance > 0) {
-		const int FALLOFF = 24;                         // MAX_SOUND_FALLOFF
-		vol = (distance >= FALLOFF) ? 0 : vol * (FALLOFF - distance) / FALLOFF;
+	int base = vol256 * 255 / 256 * g_sfx_vol / 100;    // 0..256 -> 0..255, x master
+	if (base > 255) {
+		base = 255;
 	}
-	if (vol <= 0) {
-		return -1;
+	if (base <= 0) {
+		return -1;                                      // muted
 	}
-	if (vol > 255) {
-		vol = 255;
-	}
-	int pan = balance / 2;                              // -256..256 -> -128..128
-	if (pan < -128) {
-		pan = -128;
-	}
-	if (pan > 127) {
-		pan = 127;
-	}
+	const int pan = clamp_pan(balance);
 
 	const uint32_t now = (uint32_t)cron_time_ms();
 	int            v   = -1;
@@ -403,34 +417,24 @@ int play_sfx(int num, int vol256, int balance, int repeat, int distance) {
 	}
 	g_voice_rr = (v + 1) % SFX_VOICES;
 
+	// Held even when the distance falloff silences it (eff 0) so a looping
+	// positional SFX (e.g. a fountain) can be brought up by update_sfx as the
+	// listener approaches — mirrors Exult's mixer->set2DPosition.
 	cron_sample(SFX_SLOT, s->pcm.get(), (int32_t)s->len, (int32_t)s->rate);
-	cron_pcm(v, SFX_SLOT, 0x10000, vol, pan, repeat ? 1 : 0);
+	cron_pcm(v, SFX_SLOT, 0x10000, sfx_falloff(base, distance), pan, repeat ? 1 : 0);
 
-	g_voice_num[v]   = num;
-	uint32_t dur_ms  = s->rate ? (uint32_t)((uint64_t)s->len * 1000 / s->rate) : 0;
-	g_voice_end[v]   = repeat ? 0xFFFFFFFFu : now + dur_ms;
+	g_voice_num[v]  = num;
+	g_voice_base[v] = base;
+	uint32_t dur_ms = s->rate ? (uint32_t)((uint64_t)s->len * 1000 / s->rate) : 0;
+	g_voice_end[v]  = repeat ? 0xFFFFFFFFu : now + dur_ms;
 	return v;
 }
 
-void update_sfx(int channel, int vol256, int balance) {
+void update_sfx(int channel, int distance, int balance) {
 	if (channel < 0 || channel >= SFX_VOICES) {
 		return;
 	}
-	int vol = vol256 * 255 / 256 * g_sfx_vol / 100;
-	if (vol < 0) {
-		vol = 0;
-	}
-	if (vol > 255) {
-		vol = 255;
-	}
-	int pan = balance / 2;
-	if (pan < -128) {
-		pan = -128;
-	}
-	if (pan > 127) {
-		pan = 127;
-	}
-	cron_pcm_params(channel, vol, pan);
+	cron_pcm_params(channel, sfx_falloff(g_voice_base[channel], distance), clamp_pan(balance));
 }
 
 void stop_sfx(int channel) {

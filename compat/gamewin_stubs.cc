@@ -31,6 +31,10 @@
 #include "databuf.h"      /* IDataSource / IFileDataSource */
 #include "exceptions.h"   /* file_read_exception */
 #include "audio_cron.h"   /* cron_audio:: host-native music/SFX backend */
+#include "gamewin.h"      /* Game_window::get_win_tile_rect / get_camera_actor (SFX pos) */
+#include "tiles.h"        /* Tile_coord / TileRect (2D sound position) */
+#include "objs/objs.h"    /* Game_object::get_tile (positional play_sound_effect) */
+#include "actors.h"       /* Actor (get_camera_actor()->get_lift()) */
 #include <cstring>        /* strcmp */
 #include <memory>
 #include <optional>
@@ -180,20 +184,52 @@ bool   Audio::start_music(const std::string& fname, int num, bool continuous, My
     return cron_audio::start_music(num, continuous, static_cast<cron_audio::Force>(force), fname);
 }
 void   Audio::stop_music() { cron_audio::stop_music(); }
-/* Digital SFX -> the host SPU voices (cron_audio). The positional overloads play
- * centred for now (no distance/balance) — spatialisation is a later refinement. */
+/* Digital SFX -> the host SPU voices (cron_audio), now SPATIALISED: the
+ * Game_object/Tile_coord overloads compute the 2D distance + balance from the
+ * camera (reimplemented faithfully from Audio.cc — that TU isn't compiled) and
+ * pass them to cron_audio, which pans + distance-attenuates the voice. */
+void Audio::get_2d_position_for_tile(const Tile_coord& tile, int& distance, int& balance) {
+    distance = 0;
+    balance  = 0;
+    Game_window* gwin = Game_window::get_instance();
+    Actor*       cam  = gwin ? gwin->get_camera_actor() : nullptr;
+    if (!cam) {
+        return;    // no camera yet (e.g. an egg SFX during setup) -> play centred
+    }
+    const TileRect   size = gwin->get_win_tile_rect();
+    const Tile_coord apos(size.x + size.w / 2, size.y + size.h / 2, cam->get_lift());
+    const int        sqr_dist = apos.square_distance_screen_space(tile);
+    if (sqr_dist > MAX_SOUND_FALLOFF * MAX_SOUND_FALLOFF) {
+        distance = 257;
+        return;
+    }
+    distance = sqr_dist * 256 / (MAX_SOUND_FALLOFF * MAX_SOUND_FALLOFF);
+    balance  = (Tile_coord::delta(apos.tx, tile.tx) * 2 - tile.tz - apos.tz) * 32 / 5;
+}
+
 int    Audio::play_sound_effect(int num, int volume, int balance, int repeat, int distance) {
     return cron_audio::play_sfx(num, volume, balance, repeat, distance);
 }
-int    Audio::play_sound_effect(int num, const Game_object*, int volume, int repeat) {
-    return cron_audio::play_sfx(num, volume, 0, repeat, 0);
+int    Audio::play_sound_effect(int num, const Tile_coord& tile, int volume, int repeat) {
+    int distance, balance;
+    get_2d_position_for_tile(tile, distance, balance);
+    if (distance > 256) { distance = 256; }
+    return cron_audio::play_sfx(num, volume, balance, repeat, distance);
 }
-int    Audio::play_sound_effect(int num, const Tile_coord&, int volume, int repeat) {
-    return cron_audio::play_sfx(num, volume, 0, repeat, 0);
+int    Audio::play_sound_effect(int num, const Game_object* obj, int volume, int repeat) {
+    return play_sound_effect(num, obj->get_tile(), volume, repeat);
 }
 int    Audio::play_sound_effect(const File_spec&, int, int, int, int, int) { return -1; }
-int    Audio::update_sound_effect(int chan, const Game_object*) { return chan; }
-int    Audio::update_sound_effect(int chan, const Tile_coord&) { return chan; }
+int    Audio::update_sound_effect(int chan, const Tile_coord& tile) {
+    int distance, balance;
+    get_2d_position_for_tile(tile, distance, balance);
+    if (distance > 256) { distance = 256; }
+    cron_audio::update_sfx(chan, distance, balance);
+    return chan;
+}
+int    Audio::update_sound_effect(int chan, const Game_object* obj) {
+    return update_sound_effect(chan, obj->get_tile());
+}
 void   Audio::stop_sound_effect(int chan) { cron_audio::stop_sfx(chan); }
 void   Audio::stop_sound_effects() { cron_audio::stop_all_sfx(); }
 bool   Audio::start_speech(int, bool) { return false; }

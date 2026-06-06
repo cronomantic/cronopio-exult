@@ -66,7 +66,9 @@ int  current_track();
 // 0..256, balance -256..256, distance attenuation). Decoded PCM is cached (the
 // host references cart memory while a voice plays, so the buffers must persist).
 int  play_sfx(int num, int vol256, int balance, int repeat, int distance);
-void update_sfx(int channel, int vol256, int balance);
+// Reposition a playing SFX: re-apply the distance falloff (0..256, 256 = silent)
+// to the voice's stored base volume + the new pan. Mirrors mixer->set2DPosition.
+void update_sfx(int channel, int distance, int balance);
 void stop_sfx(int channel);
 void stop_all_sfx();
 bool sfx_playing(int num);
