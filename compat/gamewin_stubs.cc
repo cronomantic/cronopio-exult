@@ -189,8 +189,29 @@ void SoundTester::test_sound() {}
  * are in gw.sh's TU set, so their former inert stubs are gone. The `keybinder`
  * global (exult.cc) is still defined above. */
 
+/* Translate_keyboard (exult.cc, excluded): decode an SDL event into the (chr,
+ * unicode) pair the engine's key_down handlers expect. REAL here (not the old
+ * inert stub) so the OSK's synthetic events deliver characters:
+ *  - TEXT_INPUT  -> chr = SDLK_UNKNOWN, unicode = the typed char. Gump key_down
+ *    handlers add the char (their `chr != UNKNOWN && TextInputActive` skip — meant
+ *    to drop the duplicate physical KEY_DOWN — is bypassed because chr == UNKNOWN).
+ *  - KEY_DOWN/UP -> chr = unicode = the keycode (printable keycodes ARE the ASCII
+ *    char; specials like BACKSPACE/RETURN are matched on chr). */
+bool Translate_keyboard(const SDL_Event& e, SDL_Keycode& chr, SDL_Keycode& unicode, bool) {
+    if (e.type == SDL_EVENT_TEXT_INPUT) {
+        chr     = SDLK_UNKNOWN;
+        unicode = e.text.text ? (SDL_Keycode)(unsigned char)e.text.text[0] : 0;
+        return unicode != 0;
+    }
+    if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
+        chr     = e.key.key;
+        unicode = e.key.key;
+        return true;
+    }
+    return false;
+}
+
 /* ---- imagewin save_screenshot.cc (excluded) --------------------------- */
-bool Translate_keyboard(const SDL_Event&, SDL_Keycode&, SDL_Keycode&, bool) { return false; }
 bool SaveIMG_RW(SDL_Surface*, SDL_IOStream*, bool, int) { return false; }
 
 /* ---- exult.cc (main TU, excluded) -------------------------------------- */

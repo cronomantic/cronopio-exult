@@ -286,6 +286,10 @@ static bool evq_pop(SDL_Event* e) {
 static float  g_mouse_x = 0.0f, g_mouse_y = 0.0f;
 static Uint32 g_mouse_sdl_mask = 0;        /* SDL L/M/R mask */
 static Uint32 g_prev_pad = 0;
+/* While the cart's OSK is active (it owns the flag, set around the text modal),
+ * the pad face buttons DRIVE the OSK (type/backspace/enter), so their normal
+ * action-key synthesis below is suppressed. */
+extern "C" int exult_osk_active(void);   /* defined in src/gamewin_probe.cc */
 static Sint16 g_axis_x = 0, g_axis_y = 0;  /* synthetic LEFT stick from d-pad */
 static int    g_gamepad_dev = 0;           /* dummy device handle backing */
 
@@ -373,7 +377,10 @@ void SDL_PumpEvents(void) {
      * its ASCII keycode, mod=NONE). The cart dispatches these to the engine's
      * native keybinder (gump_man->handle_kbd_event then keybinder->HandleEvent),
      * so the pad reaches the full action set with no per-action cart code.
-     * D-pad bits are the movement stick (above), so only the face buttons map. */
+     * D-pad bits are the movement stick (above), so only the face buttons map.
+     * SUPPRESSED while the OSK is active: then A/B/START drive the OSK (type/
+     * backspace/enter) cart-side, so they must NOT also fire 'i'/'c'/Esc here. */
+    if (exult_osk_active()) { g_prev_pad = pad; return; }
     static const struct { uint32_t btn; SDL_Keycode key; } KEYMAP[] = {
         { CRON_BTN_A,     (SDL_Keycode)'i' },   /* inventory      */
         { CRON_BTN_B,     (SDL_Keycode)'c' },   /* toggle_combat  */
@@ -437,8 +444,11 @@ Sint16       SDL_GetGamepadAxis(SDL_Gamepad*, SDL_GamepadAxis axis) {
     return 0;
 }
 const char*  SDL_GetKeyName(SDL_Keycode) { return ""; }
+/* Cronopio has no keyboard; text entry is the cart's OSK (driven by the pad). The
+ * engine's SDL text-input mode is only used by Exult's TOUCH path (touchui is null
+ * here), so these are inert. The OSK's on/off is the cart-owned exult_osk_active(). */
 bool         SDL_StartTextInput(SDL_Window*) { return true; }
-bool         SDL_StopTextInput(SDL_Window*) { return true; }
+bool         SDL_StopTextInput(SDL_Window*)  { return true; }
 bool         SDL_TextInputActive(SDL_Window*) { return false; }
 SDL_Finger** SDL_GetTouchFingers(SDL_TouchID, int* count) {
     if (count) *count = 0;

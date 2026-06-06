@@ -35,6 +35,8 @@
 #include "gumps/Newfile_gump.h"  /* save/load modal — a text-input consumer (OSK target) */
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
+#include "shapevga.h"      /* Shape_manager::paint_text — draw the OSK glyphs */
+#include "singles.h"       /* Game_singletons::sman (reached via a derived helper) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
 #include <coro.h>          /* cron_coro_* — run the loop on a coroutine so the
                             * engine's BLOCKING code (do_modal_gump, fades, …)
@@ -43,6 +45,7 @@
 extern KeyBinder* keybinder;   /* created + LoadDefaults() in Game_window::init_files */
 
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <string>
 
@@ -224,6 +227,13 @@ static unsigned s_last_b1_click = 0;
 /* Right-press landed on a closable gump -> close it on release (and suppress the
  * RMASK walk meanwhile). Mirrors exult.cc's right_on_gump. */
 static bool     s_right_on_gump = false;
+
+/* OSK active flag — OWNED by the cart, set around a text-input modal (the save
+ * gump's SDL_StartTextInput is touch-only and never fires here, so we drive the
+ * OSK explicitly). The SDL shim reads exult_osk_active() to suppress the pad's
+ * action-key synthesis while the OSK has the face buttons. */
+static bool g_osk_active = false;
+extern "C" int exult_osk_active(void) { return g_osk_active ? 1 : 0; }
 
 /* Mirror of the cases of exult.cc Handle_event the cart drives so far: KEY_DOWN/UP
  * (keybinder actions — the pad face buttons), GAMEPAD_AXIS_MOTION (the movement
@@ -425,7 +435,9 @@ static void engine_tick(Game_window* gwin) {
         const uint32_t  pad = cron_pad(0);
         if ((pad & CRON_BTN_SELECT) && !(s_prev_modal_pad & CRON_BTN_SELECT)) {
             Newfile_gump* sg = new Newfile_gump();
+            g_osk_active = true;       /* OSK on for the duration of this text modal */
             gwin->get_gump_man()->do_modal_gump(sg, Mouse::hand);
+            g_osk_active = false;
             delete sg;
         }
         s_prev_modal_pad = pad;
@@ -459,6 +471,79 @@ static void engine_tick(Game_window* gwin) {
     gwin->rotatecolours();                   // water/lava palette cycling
 }
 
+/* --- On-screen keyboard (OSK) ------------------------------------------------
+ * Cronopio is keyboard-free, so text entry (save names, naming, conversation)
+ * uses an OSK the cart draws + drives with the pad ([[exult-input-model]]). It is
+ * drawn + handled in exult_engine_yield (the per-host-frame chokepoint) while
+ * g_osk_active (set by the cart around a text-input modal) — crucially that runs
+ * DURING do_modal_gump (where the cart's engine_tick is blocked), so the OSK works
+ * inside the modal. d-pad moves
+ * the selection; A types the char as a synthetic SDL_EVENT_TEXT_INPUT; B = backspace,
+ * START = enter (KEY_DOWN). Those events go into the shim queue and the modal loop's
+ * SDL_PollEvent drains them into the gump's key_down (Translate_keyboard turns a
+ * TEXT_INPUT into key_down(SDLK_UNKNOWN, char) -> AddCharacter). */
+namespace { struct CartGS : Game_singletons { static Shape_manager* sm() { return sman; } }; }
+
+static const char* OSK_ROWS[4] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789 .-_"};
+static int osk_row = 0, osk_col = 0;
+
+static void osk_draw_and_drive(Game_window* gwin) {
+    /* --- pad navigation (edge-detected) --- */
+    static uint32_t prev = 0;
+    const uint32_t  pad  = cron_pad(0);
+    const uint32_t  down = pad & ~prev;
+    prev = pad;
+    if (down & CRON_BTN_UP)    osk_row = (osk_row + 3) % 4;
+    if (down & CRON_BTN_DOWN)  osk_row = (osk_row + 1) % 4;
+    if (down & CRON_BTN_LEFT)  osk_col = (osk_col + 9) % 10;
+    if (down & CRON_BTN_RIGHT) osk_col = (osk_col + 1) % 10;
+
+    static char chbuf[2] = {0, 0};
+    auto push_text = [](char c) {
+        chbuf[0] = c;
+        SDL_Event e;
+        std::memset(&e, 0, sizeof e);
+        e.type      = SDL_EVENT_TEXT_INPUT;
+        e.text.text = chbuf;
+        SDL_PushEvent(&e);
+    };
+    auto push_key = [](SDL_Keycode k) {
+        SDL_Event e;
+        std::memset(&e, 0, sizeof e);
+        e.type     = SDL_EVENT_KEY_DOWN;
+        e.key.key  = k;
+        e.key.down = true;
+        SDL_PushEvent(&e);
+    };
+    if (down & CRON_BTN_A)     push_text(OSK_ROWS[osk_row][osk_col]);
+    if (down & CRON_BTN_B)     push_key(SDLK_BACKSPACE);
+    if (down & CRON_BTN_START) push_key(SDLK_RETURN);
+
+    /* --- draw the keyboard panel onto the 8bpp buffer (over the gump) --- */
+    Image_buffer8* ib = gwin->get_win()->get_ib8();
+    Shape_manager* sm = CartGS::sm();
+    const int cw = 20, ch = 14, cols = 10, rows = 4;
+    const int px = (gwin->get_width() - cols * cw) / 2;   /* centred */
+    const int py = gwin->get_height() - rows * ch - 6;    /* near the bottom */
+    /* Font 2's glyphs are DARK, so use a LIGHT tan panel (141, the gump UI brown)
+     * for legibility; mark the selection with a black box OUTLINE (palette-robust,
+     * no need to guess a bright highlight index). */
+    ib->fill8(141, cols * cw + 4, rows * ch + 4, px - 2, py - 2);
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const int  gx = px + c * cw, gy = py + r * ch;
+            const char s[2] = {OSK_ROWS[r][c], 0};
+            if (sm) sm->paint_text(2, s, gx + 6, gy + 2);    /* dark glyph on tan */
+            if (r == osk_row && c == osk_col) {              /* selection outline (black) */
+                ib->fill8(0, cw, 1, gx, gy);
+                ib->fill8(0, cw, 1, gx, gy + ch - 1);
+                ib->fill8(0, 1, ch, gx, gy);
+                ib->fill8(0, 1, ch, gx + cw - 1, gy);
+            }
+        }
+    }
+}
+
 /* Present the engine's 8bpp buffer to CRON_FB, then yield the coroutine to the
  * host (one host frame). Called (a) by engine_loop after each tick, and (b) by the
  * SDL shim's SDL_Delay — so Exult's BLOCKING loops (do_modal_gump, fades, the
@@ -471,6 +556,12 @@ extern "C" void exult_engine_yield(void) {
         return;
     }
     if (g_gwin) {
+        /* OSK overlay: drawn here (the per-host-frame chokepoint) so it shows AND
+         * is driven even while a blocking do_modal_gump owns the loop. Drawn on top
+         * of whatever the engine last painted, just before the present. */
+        if (g_osk_active) {
+            osk_draw_and_drive(g_gwin);
+        }
         Image_window8* w  = g_gwin->get_win();
         Image_buffer8* ib = w->get_ib8();
         vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
