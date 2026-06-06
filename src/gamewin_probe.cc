@@ -29,8 +29,10 @@
 #include "iwin8.h"         /* Image_window8 / Image_buffer8 (present) */
 #include "vid_cron.h"      /* vid_present -> CRON_FB */
 #include "tqueue.h"        /* Time_queue::activate (per-frame world advance) */
-#include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps */
-#include "mouse.h"         /* Mouse::*_speed_factor (static), Mouse::mouse() */
+#include "gumps/Gump_manager.h"  /* Gump_manager::update_gumps / find_gump */
+#include "gumps/Gump.h"          /* Gump::on_button (gump-button hit test) */
+#include "gumps/Gump_button.h"   /* Gump_button::is_checkmark */
+#include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
 
@@ -115,6 +117,20 @@ void setup(void) {
         gwin->setup_game(false);    // terrain + NPCs + usecode + eggs
         LOGF("setup_game done\n");
 
+        /* Engine cursor — REQUIRED before any gump/mouse INTERACTION (not just
+         * the cursor-rendering slice): the gump-click path dereferences
+         * Mouse::mouse() throughout (Gump_manager::double_clicked,
+         * Game_window::start_dragging via Dragging_info, set_speed_cursor). So
+         * the Mouse must exist before clicks; its on-screen RENDERING (show/hide
+         * around paint) is still a later slice — here it only backs input/hit
+         * tests + speed cursor. Mirrors exult.cc Play()'s `Mouse mouse(gwin)`:
+         * loads <STATIC>/pointers.shp (case-insensitive ROM find of POINTERS.SHP)
+         * and MakeCurrent()s itself so Mouse::mouse() returns it. Heap-allocated
+         * to outlive setup() into frame() (never deleted — lives for the run). */
+        new Mouse(gwin);
+        Mouse::mouse()->set_shape(Mouse::hand);
+        LOGF("engine cursor ready (Mouse::mouse=%p)\n", (void*)Mouse::mouse());
+
         gwin->paint();              // composite the world into the 8bpp buffer
         LOGF("paint done\n");
         /* Success: RETURN (don't cron_exit) so frame() presents the painted
@@ -148,8 +164,22 @@ static int   joy_aim_x = 0, joy_aim_y = 0;     /* mirrors exult.cc statics */
 static float joy_speed_factor = (float)Mouse::medium_speed_factor;
 static bool  g_walking = false;                /* issuing start_actor last frame? */
 
-/* Mirror of exult.cc Handle_event's GAMEPAD_AXIS_MOTION case (the only event this
- * movement slice acts on; everything else is consumed). */
+/* Left-button drag/click state — mirrors exult.cc's file-scope dragging/dragged/
+ * last_b1_click/left_down_x/y. The gump-click slice: a left press starts a drag
+ * (which also detects gump-button presses + gump-item grabs in Dragging_info);
+ * release drops it, and a quick same-spot click-pair is a double-click (the U7
+ * 'use' gesture, routed through open gumps first by Game_window::double_clicked). */
+static bool     s_dragging = false, s_dragged = false;
+static int      s_left_down_x = 0, s_left_down_y = 0;
+static unsigned s_last_b1_click = 0;
+/* Right-press landed on a closable gump -> close it on release (and suppress the
+ * RMASK walk meanwhile). Mirrors exult.cc's right_on_gump. */
+static bool     s_right_on_gump = false;
+
+/* Mirror of the cases of exult.cc Handle_event the cart drives so far: KEY_DOWN/UP
+ * (keybinder actions — the pad face buttons), GAMEPAD_AXIS_MOTION (the movement
+ * stick — the d-pad), and the MOUSE_BUTTON_DOWN/UP/MOTION gump-click + drag path
+ * (left = drag/use, right = walk / close-gump). Unhandled events are consumed. */
 static void handle_event_cart(Game_window* gwin, SDL_Event& e) {
     switch (e.type) {
     case SDL_EVENT_KEY_DOWN:
@@ -164,8 +194,101 @@ static void handle_event_cart(Game_window* gwin, SDL_Event& e) {
         return;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
         break;     /* the movement stick — handled below */
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        /* Mirror exult.cc Handle_event's MOUSE_BUTTON_DOWN (button 1): begin a
+         * drag. Dragging_info(x,y) does the gump hit-test — it find_gump's the
+         * click and, if on a gump button, pushes it; if on a gump item, grabs
+         * it for drag; else starts dragging the gump/world object. (Right-button
+         * walk is handled by the mouse-RMASK continuation in run_input.) */
+        int x, y;
+        gwin->get_win()->screen_to_game(e.button.x, e.button.y, gwin->get_fastmouse(), x, y);
+        if (e.button.button == SDL_BUTTON_LEFT) {
+            Gump*        g;
+            Gump_button* btn;
+            /* Allow the drag (and thus button presses) when the avatar can act,
+             * or — even when it can't — on a gump checkmark so a gump can always
+             * be closed. (cheat/map-editor paths omitted — not built in the cart.) */
+            if (gwin->main_actor_can_act()
+                || ((g = gwin->get_gump_man()->find_gump(x, y, false)) != nullptr
+                    && (btn = g->on_button(x, y)) != nullptr && btn->is_checkmark())) {
+                s_dragging = gwin->start_dragging(x, y);
+                s_dragged  = false;
+            }
+            s_left_down_x = x;
+            s_left_down_y = y;
+        } else if (e.button.button == SDL_BUTTON_RIGHT) {
+            /* Mirror exult.cc: a right-press on a closable gump ARMS a close
+             * (fired on release) and suppresses the RMASK walk; off a gump the
+             * mouse-RMASK continuation in run_input walks the avatar. */
+            Gump_manager* gm = gwin->get_gump_man();
+            if (!s_dragging && gm->can_right_click_close() && gm->gump_mode()
+                && gm->find_gump(x, y, false) != nullptr) {
+                s_right_on_gump = true;
+            }
+        }
+        return;
+    }
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        /* Mirror exult.cc MOUSE_BUTTON_UP (button 1): finish the drag (drop_dragged
+         * also fires a pushed gump button's action), and treat a quick same-spot
+         * click-pair as a double-click -> Game_window::double_clicked (use item /
+         * open gump). The cheat/touch-pathfind/show_items branches are omitted. */
+        int x, y;
+        gwin->get_win()->screen_to_game(e.button.x, e.button.y, gwin->get_fastmouse(), x, y);
+        if (e.button.button == SDL_BUTTON_LEFT) {
+            const unsigned curtime = (unsigned)SDL_GetTicks();
+            if (s_dragging) {
+                gwin->drop_dragged(x, y, s_dragged);
+                if (Mouse::mouse()) Mouse::mouse()->set_speed_cursor();
+            }
+            if (curtime - s_last_b1_click < 500
+                && s_left_down_x - 1 <= x && x <= s_left_down_x + 1
+                && s_left_down_y - 1 <= y && y <= s_left_down_y + 1) {
+                s_dragging = s_dragged = false;
+                gwin->double_clicked(x, y);
+                if (Mouse::mouse()) Mouse::mouse()->set_speed_cursor();
+                return;
+            }
+            if (!s_dragging || !s_dragged) {
+                s_last_b1_click = curtime;
+            }
+            s_dragging = s_dragged = false;
+        } else if (e.button.button == SDL_BUTTON_RIGHT) {
+            /* Mirror exult.cc MOUSE_BUTTON_UP (button 3) in gump mode: a right
+             * release on the armed gump closes it. (Out of gump mode the right
+             * button is a walk, handled by the run_input RMASK continuation.) */
+            Gump_manager* gm = gwin->get_gump_man();
+            if (gm->gump_mode() && s_right_on_gump) {
+                Gump* g = gm->find_gump(x, y, false);
+                if (g != nullptr) {
+                    gwin->add_dirty(g->get_dirty());
+                    gm->close_gump(g);
+                }
+            }
+            s_right_on_gump = false;
+        }
+        return;
+    }
+    case SDL_EVENT_MOUSE_MOTION: {
+        /* Mirror exult.cc MOUSE_MOTION: keep the engine cursor position in sync
+         * and, while the left button is held, feed the drag (gwin->drag returns
+         * true once motion passes the threshold -> mark dragged so the release
+         * drops the item instead of registering a click). Right-button walk is
+         * the run_input RMASK continuation, not here, to avoid a double
+         * start_actor per frame. */
+        int mx, my;
+        gwin->get_win()->screen_to_game(e.motion.x, e.motion.y, gwin->get_fastmouse(), mx, my);
+        if (Mouse::mouse()) {
+            Mouse::mouse()->move(mx, my);
+            if (!s_dragging) Mouse::mouse()->set_speed_cursor();
+        }
+        if (s_dragging && (e.motion.state & SDL_BUTTON_LMASK)) {
+            s_dragged = gwin->drag(mx, my);
+        }
+        return;
+    }
     default:
-        return;    /* mouse / wheel: the movement continuation + later slices */
+        return;    /* wheel + later slices */
     }
     if (e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTX && e.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTY) {
         return;
@@ -214,7 +337,7 @@ static void run_input(Game_window* gwin) {
     if (can_act) {
         float  fx = 0, fy = 0;
         Uint32 ms = SDL_GetMouseState(&fx, &fy);
-        if (ms & SDL_BUTTON_RMASK) {         /* right-button walk toward the cursor */
+        if ((ms & SDL_BUTTON_RMASK) && !s_right_on_gump) {  /* right-button walk toward the cursor */
             if (!gwin->is_moving() || gwin->get_step_tile_delta() == 1) {
                 const int spd = Mouse::mouse() ? Mouse::mouse()->avatar_speed : 125;
                 gwin->start_actor((int)fx, (int)fy, spd);
