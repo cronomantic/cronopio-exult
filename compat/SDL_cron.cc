@@ -183,8 +183,8 @@ SDL_bool    SDL_SetWindowFullscreen(SDL_Window*, SDL_bool) { return 1; }
 SDL_bool    SDL_SetWindowFullscreenMode(SDL_Window*, const SDL_DisplayMode*) { return 1; }
 SDL_bool    SDL_SetWindowPosition(SDL_Window*, int, int) { return 1; }
 SDL_bool    SDL_SetWindowTitle(SDL_Window*, const char*) { return 1; }
-SDL_bool    SDL_GetWindowSize(SDL_Window*, int* w, int* h) { if (w) *w = 320; if (h) *h = 200; return 1; }
-SDL_bool    SDL_GetWindowSizeInPixels(SDL_Window*, int* w, int* h) { if (w) *w = 320; if (h) *h = 200; return 1; }
+SDL_bool    SDL_GetWindowSize(SDL_Window*, int* w, int* h) { if (w) *w = 320; if (h) *h = 240; return 1; }
+SDL_bool    SDL_GetWindowSizeInPixels(SDL_Window*, int* w, int* h) { if (w) *w = 320; if (h) *h = 240; return 1; }
 SDL_DisplayID SDL_GetDisplayForWindow(SDL_Window*) { return 1; }
 
 SDL_Renderer* SDL_CreateRenderer(SDL_Window*, const char*) { return nullptr; }
@@ -194,7 +194,7 @@ SDL_bool      SDL_SetRenderDrawColor(SDL_Renderer*, Uint8, Uint8, Uint8, Uint8) 
 SDL_bool      SDL_RenderClear(SDL_Renderer*) { return 1; }
 SDL_bool      SDL_RenderPresent(SDL_Renderer*) { return 1; }
 SDL_bool      SDL_RenderTexture(SDL_Renderer*, SDL_Texture*, const SDL_Rect*, const SDL_Rect*) { return 1; }
-SDL_bool      SDL_GetCurrentRenderOutputSize(SDL_Renderer*, int* w, int* h) { if (w) *w = 320; if (h) *h = 200; return 1; }
+SDL_bool      SDL_GetCurrentRenderOutputSize(SDL_Renderer*, int* w, int* h) { if (w) *w = 320; if (h) *h = 240; return 1; }
 SDL_bool      SDL_SetRenderLogicalPresentation(SDL_Renderer*, int, int, SDL_RendererLogicalPresentation) { return 1; }
 
 SDL_Texture* SDL_CreateTexture(SDL_Renderer*, SDL_PixelFormat, int, int, int) { return nullptr; }
@@ -206,7 +206,7 @@ SDL_bool     SDL_UpdateTexture(SDL_Texture*, const SDL_Rect*, const void*, int) 
  * 8bpp path (create_surface makes an 8bpp display/draw surface), with no source
  * patch — purely by what the shim returns. The cart then blits the engine's 8bpp
  * buffer to CRON_FB. See memory fork-patch-policy. */
-static SDL_DisplayMode g_mode = {1, SDL_PIXELFORMAT_INDEX8, 320, 200, 1.0f, 60.0f, 60, 1, nullptr};
+static SDL_DisplayMode g_mode = {1, SDL_PIXELFORMAT_INDEX8, 320, 240, 1.0f, 60.0f, 60, 1, nullptr};
 SDL_DisplayID    SDL_GetPrimaryDisplay(void) { return 1; }
 const SDL_DisplayMode* SDL_GetDesktopDisplayMode(SDL_DisplayID) { return &g_mode; }
 SDL_DisplayMode** SDL_GetFullscreenDisplayModes(SDL_DisplayID, int* count) { if (count) *count = 0; return nullptr; }

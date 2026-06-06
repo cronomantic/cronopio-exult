@@ -8,7 +8,7 @@
  * Sequence mirrors exult.cc Init() (the EXULT_MENU_GAME bring-up at exult.cc:2833):
  *   exult_files_init()                    -> ROM-FS + <STATIC>/<DATA>/... tokens
  *   config = new Configuration            -> defaults only (no exult.cfg on disk)
- *   gwin = new Game_window(320,200,...)   -> LIGHT: allocates the subsystems
+ *   gwin = new Game_window(320,240,...)   -> LIGHT: allocates the subsystems
  *   Game::create_game(&bg)                -> sets the BG_Game singleton + paths
  *   gwin->init_files(false)               -> Usecode_machine + shape_man->load()
  *
@@ -86,8 +86,19 @@ void setup(void) {
 
         config = new Configuration();    // defaults only; Configuration::value falls back
 
+        /* 320x240 with FILL, NOT 320x200: the Cronopio host framebuffer is
+         * 320x240 (--region=fb:76800; vid_cron.cc FB_W/FB_H) and vid_present
+         * blits the game buffer (get_ib8()) to the FB top-left, so a 320x200
+         * game area leaves the bottom 40 FB rows unpainted (an ugly border).
+         * The default fillmode (AspectCorrectCentre) CAPS the game area to the
+         * aspect-correct 320x200 and centres it — get_ib8() would be 320x200.
+         * Image_window::Fill makes the game area the FULL 320x240 with no aspect
+         * cap and no centring offset (so screen coords == game coords — the old
+         * AspectCorrectCentre y-offset is gone). Exult just shows 40 more rows of
+         * world. The SDL3 shim reports a 320x240 window/display to match. */
         Game_window* gwin = new Game_window(
-                320, 200, /*fullscreen*/ false, 320, 200, /*scale*/ 1, /*scaler*/ 0);
+                320, 240, /*fullscreen*/ false, 320, 240, /*scale*/ 1, /*scaler*/ 0,
+                Image_window::Fill);
         g_gwin = gwin;
         LOGF("Game_window constructed (win=%p)\n", (void*)gwin->get_win());
 
