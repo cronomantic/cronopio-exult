@@ -217,7 +217,10 @@ void   MyMidiPlayer::stop_music(bool) { cron_audio::stop_music(); }
 int    MyMidiPlayer::get_current_track() const { return cron_audio::current_track(); }
 void   MyMidiPlayer::set_repeat(bool) {}
 void   MyMidiPlayer::set_timbre_lib(TimbreLibrary) {}
-void   MyMidiPlayer::set_midi_driver(const std::string&, bool) {}
+/* The Audio Options gump's "Digital Music" toggle reaches us here (save_settings
+ * → set_midi_driver(name, use_oggs)); route it to the cart-side MIDI/Ogg selection.
+ * Menu-only — no pad combo. */
+void   MyMidiPlayer::set_midi_driver(const std::string&, bool use_oggs) { cron_audio::set_use_ogg(use_oggs); }
 void   MyMidiPlayer::SetMidiMusicVolume(int vol, bool) { cron_audio::set_music_volume(vol); }
 int    MyMidiPlayer::GetMidiMusicVolume() { return 100; }
 void   MyMidiPlayer::SetOggMusicVolume(int, bool) {}
@@ -226,8 +229,14 @@ bool   MyMidiPlayer::is_mt32() const { return false; }
 bool   MyMidiPlayer::init_device(bool) { return false; }
 
 /* ---- MidiDriver static driver enumeration ------------------------------ */
-int         MidiDriver::getDriverCount() { return 0; }
-std::string MidiDriver::getDriverName(uint32) { return std::string(); }
+/* Expose the host synth as a single real driver ("Cronopio") so the Audio Options
+ * gump's MIDI-driver button is a meaningful selectable entry in MIDI mode (instead
+ * of a bare "Default"). The gump only lists the NAME + queries settings (empty
+ * below) — it never instantiates the driver, so a stub count is safe. (The button
+ * is hidden by Exult's own design while "Digital Music" is ON — recorded music has
+ * no MIDI driver; toggle Digital Music OFF to use/select it.) */
+int         MidiDriver::getDriverCount() { return 1; }
+std::string MidiDriver::getDriverName(uint32) { return "Cronopio"; }
 std::vector<ConfigSetting_widget::Definition>
 MidiDriver::get_midi_driver_settings(const std::string&) { return {}; }
 

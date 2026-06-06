@@ -23,6 +23,12 @@ int exult_files_init(void) {
     add_system_path("<SAVEGAME>", "savegame");
     add_system_path("<PATCH>", "patch");
     add_system_path("<DATA>", "data");
+    /* <MUSIC> = the digital-music dir (Exult's NNbg.ogg pack). Registered globally
+     * by exult.cc (not compiled in the cart), so set it here. The audio pack's
+     * music/ is baked to the ROM "music/" prefix; cron_audio reads <MUSIC>/NNbg.ogg
+     * and streams it via cron_ogg_play. Not per-game (setup_game_paths doesn't
+     * clone it), so a single global registration suffices. */
+    add_system_path("<MUSIC>", "music");
 
     /* Per-game keys that BaseGameInfo::setup_game_paths() CLONES into the active
      * <STATIC>/<GAMEDAT>/<SAVEGAME>. The real GameManager registers these from

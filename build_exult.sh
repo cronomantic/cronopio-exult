@@ -123,11 +123,30 @@ if [[ -n "$STATIC_DIR" ]]; then
   # <STATIC>/NAME -> "static/NAME", <DATA>/exult.flx -> "data/exult.flx", etc.
   # (files_cron.cc maps <STATIC>-><"static">, <DATA>-><"data">.) The .flx are
   # baked as single files (no staging copy of the big STATIC tree).
-  echo "[build] baking '$STATIC_DIR' (<STATIC>) + exult*.flx (<DATA>) -> build/exult.rom..."
+  # Digital-music pack (Exult's exult_audio.zip): bake its music/*.ogg under
+  # <MUSIC> ("music/NNbg.ogg") so the cart streams them via cron_ogg_play (the
+  # selectable digital-music path; files_cron maps <MUSIC>-><"music">). The pack
+  # is user-provided in assets/ (like the STATIC game tree + WADs); extracted once
+  # to build/audiopack/music. Absent pack -> MIDI synth only (no music mount).
+  MUSIC_MOUNT=()
+  AUDIO_ZIP="$ROOT/assets/exult_audio.zip"
+  MUSIC_STAGE="$ROOT/build/audiopack/music"
+  if [[ -f "$AUDIO_ZIP" ]]; then
+    if [[ ! -d "$MUSIC_STAGE" || -z "$(ls -A "$MUSIC_STAGE" 2>/dev/null)" ]]; then
+      echo "[build] extracting digital music from $(basename "$AUDIO_ZIP")..."
+      mkdir -p "$MUSIC_STAGE"
+      ( cd "$MUSIC_STAGE" && unzip -j -o -q "$AUDIO_ZIP" "music/*.ogg" ) || {
+        echo "[build] ERROR: extracting music from audio pack failed." >&2; exit 1; }
+    fi
+    MUSIC_MOUNT=("$MUSIC_STAGE" music)
+    echo "[build] digital music: $(ls -1 "$MUSIC_STAGE"/*.ogg 2>/dev/null | wc -l) ogg tracks -> <MUSIC>"
+  fi
+  echo "[build] baking '$STATIC_DIR' (<STATIC>) + exult*.flx (<DATA>) + music (<MUSIC>) -> build/exult.rom..."
   "$ROOT/build/exultpak.exe" "$ROOT/build/exult.rom" \
     "$STATIC_DIR" static \
     "$EX/data/exult.flx" data \
     "$EX/data/exult_bg.flx" data \
+    "${MUSIC_MOUNT[@]+"${MUSIC_MOUNT[@]}"}" \
     2> "$ROOT/build/manifest.txt" || {
     echo "[build] ERROR: exultpak bake failed." >&2; exit 1; }
   tail -1 "$ROOT/build/manifest.txt"

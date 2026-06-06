@@ -8,7 +8,8 @@
 #include "XMidiFile.h"
 #include "XMidiSequence.h"
 #include "XMidiSequenceHandler.h"
-#include "databuf.h"    /* IExultDataSource / File_spec */
+#include "databuf.h"    /* IExultDataSource / IFileDataSource / File_spec */
+#include "fnames.h"     /* MAINMUS / MAINMUS_AD (digital-music mapping) */
 
 #include <cstdint>
 #include <cstdio>
@@ -68,11 +69,19 @@ public:
 //---- backend state ----------------------------------------------------------
 
 static CronoMidiDriver g_driver;
-static XMidiSequence*  g_seq          = nullptr;
+static XMidiSequence*  g_seq          = nullptr;    // active MIDI sequence (null if Ogg)
 static int             g_track        = -1;
 static bool            g_repeat       = false;
-static int             g_music_vol    = 100;    // 0..100
+static int             g_music_vol    = 100;        // 0..100
 static bool            g_inited       = false;
+
+// Digital-Ogg selection + the last start_music request (so a toggle can restart
+// the current track on the other path). Default to Ogg — the audio pack is baked.
+static bool            g_use_ogg      = true;
+static bool            g_ogg_playing  = false;
+static int             g_cur_num      = -1;
+static bool            g_cur_repeat   = false;
+static std::string     g_cur_flex;
 
 static void log(const char* s) {
 	cron_log(s, static_cast<int32_t>(__builtin_strlen(s)));
@@ -88,10 +97,49 @@ void init() {
 	cron_midi_volume(g_music_vol * 255 / 100);
 }
 
+// Try the digital-Ogg path for an in-game (MAINMUS) track. Mirrors
+// MyMidiPlayer::ogg_play_track's BG MAINMUS mapping: <MUSIC>/%02dbg.ogg. The host
+// decodes (stb_vorbis) and COPIES the bytes (cron_ogg.c), so the temp buffer is
+// freed immediately. Returns false (→ caller falls back to MIDI) for non-MAINMUS
+// flexes or a missing/unreadable file. The whole ogg is read from the ROM via
+// Exult's file layer (IFileDataSource → U7open_in → the cart ROM-FS).
+static bool start_ogg(int num, bool repeat, const std::string& flex) {
+	if (flex != MAINMUS && flex != MAINMUS_AD) {
+		return false;    // intro/endgame use other mappings — MIDI for now
+	}
+	char name[24];
+	std::snprintf(name, sizeof(name), "<MUSIC>/%02dbg.ogg", num);
+
+	IFileDataSource ds{File_spec(name)};
+	if (!ds.good()) {
+		return false;
+	}
+	const size_t len = ds.getSize();
+	if (len == 0) {
+		return false;
+	}
+	auto buf = std::make_unique<uint8_t[]>(len);
+	ds.read(buf.get(), len);
+	cron_ogg_play(buf.get(), static_cast<int32_t>(len), repeat ? 1 : 0);
+	cron_ogg_volume(g_music_vol * 256 / 100);
+	g_ogg_playing = true;
+
+	char dbg[64];
+	int  n = std::snprintf(dbg, sizeof(dbg), "[audio] start_ogg %02dbg.ogg size=%u\n", num, (unsigned)len);
+	if (n > 0) {
+		cron_log(dbg, n);
+	}
+	return true;
+}
+
 void stop_music() {
 	if (g_seq) {
 		delete g_seq;    // dtor -> evntlist->decrementCounter() -> frees the list
 		g_seq = nullptr;
+	}
+	if (g_ogg_playing) {
+		cron_ogg_stop();
+		g_ogg_playing = false;
 	}
 	g_track = -1;
 	cron_midi_reset();    // all-notes-off
@@ -105,12 +153,21 @@ bool start_music(int num, bool repeat, Force force, const std::string& flex) {
 		return true;
 	}
 
-	// Ogg (digital) path is wired in the next slice; for now only MIDI.
-	(void)force;
+	g_cur_num    = num;
+	g_cur_repeat = repeat;
+	g_cur_flex   = flex;
 
 	stop_music();
 
-	// Mirror open_music_flex: read XMI member `num` from the flex (e.g.
+	// Digital-Ogg first (if selected and not forced to MIDI); fall back to MIDI on
+	// a missing track or a non-MAINMUS flex. Mirrors MyMidiPlayer::start_music.
+	if (g_use_ogg && force != Force::Midi && start_ogg(num, repeat, flex)) {
+		g_track  = num;
+		g_repeat = repeat;
+		return true;
+	}
+
+	// MIDI: mirror open_music_flex — read XMI member `num` from the flex (e.g.
 	// <STATIC>/mt32mus.dat). IExultDataSource resolves the U7 path through the
 	// cart ROM-FS bridge (files_cron). Single-file form: no <PATCH> music here.
 	IExultDataSource ds(File_spec(flex), num);
@@ -172,18 +229,40 @@ void set_music_volume(int vol0to100) {
 		vol0to100 = 100;
 	}
 	g_music_vol = vol0to100;
-	cron_midi_volume(g_music_vol * 255 / 100);
+	cron_midi_volume(g_music_vol * 255 / 100);     // synth: 0..255
+	cron_ogg_volume(g_music_vol * 256 / 100);      // ogg: 0..256 (Q8)
 	if (g_seq) {
 		g_seq->setVolume(g_music_vol * 255 / 100);
 	}
 }
 
 bool music_playing() {
-	return g_seq != nullptr;
+	return g_seq != nullptr || g_ogg_playing;
 }
 
 int current_track() {
 	return g_track;
+}
+
+//---- MIDI vs digital-Ogg selection ------------------------------------------
+
+// Set by Exult's Audio Options gump ("Digital Music" toggle → MyMidiPlayer::
+// set_midi_driver's use_oggs flag). Restart the current track on the chosen path so
+// the switch is heard immediately (menu-driven; no pad combo).
+void set_use_ogg(bool on) {
+	if (on == g_use_ogg) {
+		return;
+	}
+	g_use_ogg = on;
+	if (g_cur_num >= 0) {
+		start_music(g_cur_num, g_cur_repeat, Force::None, g_cur_flex);
+	}
+	const char* m = g_use_ogg ? "[audio] music -> DIGITAL (Ogg)\n" : "[audio] music -> MIDI (synth)\n";
+	cron_log(m, (int32_t)__builtin_strlen(m));
+}
+
+bool use_ogg() {
+	return g_use_ogg;
 }
 
 }    // namespace cron_audio

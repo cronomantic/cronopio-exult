@@ -33,8 +33,17 @@ enum class Force { None = 0, Midi = 1, Ogg = 2 };
 void init();
 
 // Start music track `num` from flex `flex` (e.g. MAINMUS = "<STATIC>/mt32mus.dat").
-// `repeat` loops the track. Returns true if a sequence was started.
+// `repeat` loops the track. With digital music selected (use_ogg) and an Ogg track
+// available (<MUSIC>/%02dbg.ogg), streams it via cron_ogg_play; otherwise (or on
+// failure) sequences the XMI via cron_midi_send. Returns true if anything started.
 bool start_music(int num, bool repeat, Force force, const std::string& flex);
+
+// MIDI vs digital-Ogg selection. Both paths are wired; this picks which start_music
+// uses. Default = Ogg (the audio pack is baked). Driven by Exult's Audio Options
+// gump (via MyMidiPlayer::set_midi_driver's use_oggs flag) — menu-only, no pad combo.
+// Changing it restarts the current track on the other path so the switch is heard.
+void set_use_ogg(bool on);
+bool use_ogg();
 
 // Stop the current track and silence held notes.
 void stop_music();

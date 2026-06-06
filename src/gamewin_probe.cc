@@ -37,6 +37,7 @@
 #include "Audio.h"         /* Audio::Init — host-native audio bring-up */
 #include "audio_cron.h"    /* cron_audio::pump — per-frame MIDI sequencer */
 #include "shapevga.h"      /* Shape_manager::paint_text — draw the OSK glyphs */
+#include "items.h"         /* Game::setup_text strings — get_text_msg / counts */
 #include "singles.h"       /* Game_singletons::sman (reached via a derived helper) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
 #include <coro.h>          /* cron_coro_* — run the loop on a coroutine so the
@@ -107,6 +108,11 @@ void setup(void) {
         LOGF("exult_files_init rc=%d\n", rc);
 
         config = new Configuration();    // defaults only; Configuration::value falls back
+        /* Default to digital music (the audio pack is baked) so the Audio Options
+         * gump's "Digital Music" toggle reads ON and matches cron_audio's default.
+         * Switching it there (set_midi_driver -> cron_audio::set_use_ogg) selects
+         * MIDI synth vs the recorded Ogg soundtrack — menu-only, no pad combo. */
+        config->set("config/audio/midi/use_oggs", "yes", false);
 
         /* 320x240 with FILL, NOT 320x200: the Cronopio host framebuffer is
          * 320x240 (--region=fb:76800; vid_cron.cc FB_W/FB_H) and vid_present
@@ -137,6 +143,14 @@ void setup(void) {
          * cron_audio (XMI -> cron_midi_send). See compat/audio_cron + gamewin_stubs. */
         Audio::Init();
         LOGF("Audio::Init done\n");
+
+        /* Load the UI/message string table (exultmsg.txt from <DATA>/exult.flx +
+         * the game's item/text names). Exult does this in exult.cc's Init (right
+         * after create_game); that TU isn't compiled, so the cart never called it
+         * and every get_text_msg() returned "Missing String" (menus, gump labels,
+         * item names). Mirrors exult.cc:1076. */
+        Game::setup_text();
+        LOGF("setup_text done (%d msgs, %d items)\n", get_num_text_msgs(), get_num_item_names());
 
         /* Phase 2: bring the game STATE up (what exult.cc Init() does after
          * init_files: init_gamedat -> read_gwin -> setup_game). The probe
@@ -474,8 +488,8 @@ static void engine_tick(Game_window* gwin) {
     gwin->rotatecolours();                   // water/lava palette cycling
 
     /* Advance the host-native music sequencer: dispatch every XMI event that has
-     * fallen due this frame to the host MIDI synth (cron_midi_send). Mirrors the
-     * DOOM port's I_Cron_UpdateMusic pumped from engine_tick. See compat/audio_cron. */
+     * fallen due this frame to the host MIDI synth (cron_midi_send). (Ogg streams in
+     * the host; nothing to pump.) Mirrors the DOOM port's I_Cron_UpdateMusic. */
     cron_audio::pump();
 }
 
