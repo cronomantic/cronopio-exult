@@ -477,71 +477,112 @@ static void engine_tick(Game_window* gwin) {
  * drawn + handled in exult_engine_yield (the per-host-frame chokepoint) while
  * g_osk_active (set by the cart around a text-input modal) — crucially that runs
  * DURING do_modal_gump (where the cart's engine_tick is blocked), so the OSK works
- * inside the modal. d-pad moves
- * the selection; A types the char as a synthetic SDL_EVENT_TEXT_INPUT; B = backspace,
- * START = enter (KEY_DOWN). Those events go into the shim queue and the modal loop's
+ * inside the modal. d-pad moves the selection; A activates the selected key (types a
+ * char as a synthetic SDL_EVENT_TEXT_INPUT, or Shift/Space/Del/OK on the special row);
+ * pad shortcuts B = case toggle, L = backspace, R = space, START = enter (KEY_DOWN).
+ * Those events go into the shim queue and the modal loop's
  * SDL_PollEvent drains them into the gump's key_down (Translate_keyboard turns a
  * TEXT_INPUT into key_down(SDLK_UNKNOWN, char) -> AddCharacter). */
 namespace { struct CartGS : Game_singletons { static Shape_manager* sm() { return sman; } }; }
 
-static const char* OSK_ROWS[4] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789 .-_"};
-static int osk_row = 0, osk_col = 0;
+/* Layout: 4 char rows (case-folded by Shift) + a special row of variable-width
+ * keys. Selection is (row 0-4, cell column 0-9); on the special row the column
+ * snaps to a key's start cell. */
+static const char* OSK_CHARS[4]   = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789.,'-"};
+static const int    OSK_SP_START[4] = {0, 2, 6, 8};               /* special-key start cell */
+static const int    OSK_SP_W[4]     = {2, 4, 2, 2};               /* width in cells         */
+static const char*  OSK_SP_LABEL[4] = {"Aa", "Space", "Del", "OK"};
+enum { SP_SHIFT = 0, SP_SPACE, SP_BKSP, SP_ENTER };
+static int  osk_row = 0, osk_col = 0;
+static bool osk_shift = false;     /* true -> letters typed/shown lowercase */
+
+static int osk_sp_at(int col) { return col < 2 ? 0 : col < 6 ? 1 : col < 8 ? 2 : 3; }
 
 static void osk_draw_and_drive(Game_window* gwin) {
-    /* --- pad navigation (edge-detected) --- */
     static uint32_t prev = 0;
     const uint32_t  pad  = cron_pad(0);
-    const uint32_t  down = pad & ~prev;
+    const uint32_t  dn   = pad & ~prev;
     prev = pad;
-    if (down & CRON_BTN_UP)    osk_row = (osk_row + 3) % 4;
-    if (down & CRON_BTN_DOWN)  osk_row = (osk_row + 1) % 4;
-    if (down & CRON_BTN_LEFT)  osk_col = (osk_col + 9) % 10;
-    if (down & CRON_BTN_RIGHT) osk_col = (osk_col + 1) % 10;
 
     static char chbuf[2] = {0, 0};
     auto push_text = [](char c) {
         chbuf[0] = c;
-        SDL_Event e;
-        std::memset(&e, 0, sizeof e);
-        e.type      = SDL_EVENT_TEXT_INPUT;
-        e.text.text = chbuf;
+        SDL_Event e; std::memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_TEXT_INPUT; e.text.text = chbuf;
         SDL_PushEvent(&e);
     };
     auto push_key = [](SDL_Keycode k) {
-        SDL_Event e;
-        std::memset(&e, 0, sizeof e);
-        e.type     = SDL_EVENT_KEY_DOWN;
-        e.key.key  = k;
-        e.key.down = true;
+        SDL_Event e; std::memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_KEY_DOWN; e.key.key = k; e.key.down = true;
         SDL_PushEvent(&e);
     };
-    if (down & CRON_BTN_A)     push_text(OSK_ROWS[osk_row][osk_col]);
-    if (down & CRON_BTN_B)     push_key(SDLK_BACKSPACE);
-    if (down & CRON_BTN_START) push_key(SDLK_RETURN);
 
-    /* --- draw the keyboard panel onto the 8bpp buffer (over the gump) --- */
-    Image_buffer8* ib = gwin->get_win()->get_ib8();
-    Shape_manager* sm = CartGS::sm();
-    const int cw = 20, ch = 14, cols = 10, rows = 4;
-    const int px = (gwin->get_width() - cols * cw) / 2;   /* centred */
-    const int py = gwin->get_height() - rows * ch - 6;    /* near the bottom */
-    /* Font 2's glyphs are DARK, so use a LIGHT tan panel (141, the gump UI brown)
-     * for legibility; mark the selection with a black box OUTLINE (palette-robust,
-     * no need to guess a bright highlight index). */
-    ib->fill8(141, cols * cw + 4, rows * ch + 4, px - 2, py - 2);
-    for (int r = 0; r < rows; ++r) {
-        for (int c = 0; c < cols; ++c) {
-            const int  gx = px + c * cw, gy = py + r * ch;
-            const char s[2] = {OSK_ROWS[r][c], 0};
-            if (sm) sm->paint_text(2, s, gx + 6, gy + 2);    /* dark glyph on tan */
-            if (r == osk_row && c == osk_col) {              /* selection outline (black) */
-                ib->fill8(0, cw, 1, gx, gy);
-                ib->fill8(0, cw, 1, gx, gy + ch - 1);
-                ib->fill8(0, 1, ch, gx, gy);
-                ib->fill8(0, 1, ch, gx + cw - 1, gy);
+    /* --- navigation (d-pad) --- */
+    if (dn & CRON_BTN_UP)   osk_row = (osk_row + 4) % 5;
+    if (dn & CRON_BTN_DOWN) osk_row = (osk_row + 1) % 5;
+    if (osk_row == 4) {     /* special row: move + snap the column to a key start */
+        if (dn & CRON_BTN_LEFT)  osk_col = OSK_SP_START[(osk_sp_at(osk_col) + 3) % 4];
+        if (dn & CRON_BTN_RIGHT) osk_col = OSK_SP_START[(osk_sp_at(osk_col) + 1) % 4];
+        osk_col = OSK_SP_START[osk_sp_at(osk_col)];
+    } else {
+        if (dn & CRON_BTN_LEFT)  osk_col = (osk_col + 9) % 10;
+        if (dn & CRON_BTN_RIGHT) osk_col = (osk_col + 1) % 10;
+    }
+
+    /* --- A activates the selected key --- */
+    if (dn & CRON_BTN_A) {
+        if (osk_row < 4) {
+            char c = OSK_CHARS[osk_row][osk_col];
+            if (osk_shift && c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+            push_text(c);
+        } else {
+            switch (osk_sp_at(osk_col)) {
+            case SP_SHIFT: osk_shift = !osk_shift;       break;
+            case SP_SPACE: push_text(' ');               break;
+            case SP_BKSP:  push_key(SDLK_BACKSPACE);     break;
+            case SP_ENTER: push_key(SDLK_RETURN);        break;
             }
         }
     }
+    /* --- pad shortcuts: B case, L del, R space, START enter --- */
+    if (dn & CRON_BTN_B)     osk_shift = !osk_shift;
+    if (dn & CRON_BTN_L)     push_key(SDLK_BACKSPACE);
+    if (dn & CRON_BTN_R)     push_text(' ');
+    if (dn & CRON_BTN_START) push_key(SDLK_RETURN);
+
+    /* --- draw (font 2 is DARK -> light tan panel 141 + black outline; palette-robust) --- */
+    Image_buffer8* ib = gwin->get_win()->get_ib8();
+    Shape_manager* sm = CartGS::sm();
+    const int cw = 20, ch = 13, cols = 10, ph = 5 * ch, pw = cols * cw;
+    const int px = (gwin->get_width() - pw) / 2;
+    const int py = gwin->get_height() - ph - 18;
+    ib->fill8(141, pw + 4, ph + 4, px - 2, py - 2);
+    ib->fill8(0, pw + 4, 1, px - 2, py - 2);           /* frame: top */
+    ib->fill8(0, pw + 4, 1, px - 2, py + ph + 1);      /*        bottom */
+    ib->fill8(0, 1, ph + 4, px - 2, py - 2);           /*        left */
+    ib->fill8(0, 1, ph + 4, px + pw + 1, py - 2);      /*        right */
+    auto outline = [&](int gx, int gy, int wc) {
+        ib->fill8(0, wc * cw, 1, gx, gy);
+        ib->fill8(0, wc * cw, 1, gx, gy + ch - 1);
+        ib->fill8(0, 1, ch, gx, gy);
+        ib->fill8(0, 1, ch, gx + wc * cw - 1, gy);
+    };
+    for (int r = 0; r < 4; ++r) {                      /* char rows */
+        for (int c = 0; c < cols; ++c) {
+            const int gx = px + c * cw, gy = py + r * ch;
+            char cc = OSK_CHARS[r][c];
+            if (osk_shift && cc >= 'A' && cc <= 'Z') cc = cc - 'A' + 'a';
+            const char s[2] = {cc, 0};
+            if (sm) sm->paint_text(2, s, gx + 7, gy + 2);
+            if (osk_row == r && osk_col == c) outline(gx, gy, 1);
+        }
+    }
+    for (int i = 0; i < 4; ++i) {                      /* special row */
+        const int gx = px + OSK_SP_START[i] * cw, gy = py + 4 * ch;
+        if (sm) sm->paint_text(2, OSK_SP_LABEL[i], gx + 4, gy + 2);
+        if (osk_row == 4 && osk_sp_at(osk_col) == i) outline(gx, gy, OSK_SP_W[i]);
+    }
+    if (sm) sm->paint_text(2, "A:key B:case L:del R:spc START:ok", px - 2, py + ph + 3);
 }
 
 /* Present the engine's 8bpp buffer to CRON_FB, then yield the coroutine to the
