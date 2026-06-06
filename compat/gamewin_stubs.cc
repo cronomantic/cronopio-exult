@@ -30,6 +30,7 @@
 #include "Flex.h"         /* Flex::is_flex (get_game_identity, modmgr.cc zip-free) */
 #include "databuf.h"      /* IDataSource / IFileDataSource */
 #include "exceptions.h"   /* file_read_exception */
+#include "audio_cron.h"   /* cron_audio:: host-native music/SFX backend */
 #include <cstring>        /* strcmp */
 #include <memory>
 #include <optional>
@@ -64,11 +65,17 @@ CartTouchUI g_cart_touchui;
 }    // namespace
 TouchUI*           touchui           = &g_cart_touchui;
 
-/* ---- audio subsystem (host-native in a later slice) --------------------- */
-Audio*             Audio::self       = nullptr;
+/* ---- audio subsystem (host-native: music wired, see compat/audio_cron) --- */
+Audio*             Audio::self       = nullptr;   /* created by Audio::Init() below */
 const int*         Audio::bg2si_songs = nullptr;
 const int*         Audio::bg2si_sfxs  = nullptr;
 Pentagram::AudioMixer* Pentagram::AudioMixer::the_audio_mixer = nullptr;
+
+/* A single leaked MyMidiPlayer so Audio::get_midi() is non-null: the in-game
+ * ambient-music state machine (gamewin.cc) needs player->get_ogg_enabled() true
+ * to pick background tracks, and queries get_current_track(). The real music
+ * synthesis is host-native (cron_audio); this object is just the query surface. */
+namespace { MyMidiPlayer* g_midi_player = nullptr; }
 
 /* ---- touchui.cc (excluded: needs SDL_PropertiesID) ---------------------- */
 uint32 TouchUI::eventType = 0;
@@ -141,7 +148,23 @@ ModInfo*    ModManager::get_mod(const std::string& /*name*/, bool /*checkversion
  * ======================================================================== */
 
 /* ---- Audio (audio/Audio.cc) -------------------------------------------- */
-void   Audio::Init() {}
+/* The private Audio() ctor is defined here (a static member — Audio::Init —
+ * legitimately constructs it). We only need the enable flags true so the inline
+ * is_*_enabled() queries (which gate the in-game music/sfx triggers) pass; the
+ * unique_ptr members (mixer/sfxs/sfx_file) stay null and are never dereferenced
+ * (our method stubs forward to cron_audio instead). NO fork patch. */
+Audio::Audio() {
+    initialized   = true;
+    audio_enabled = true;    // music_enabled/effects_enabled default true (Audio.h)
+}
+
+void   Audio::Init() {
+    if (!self) {
+        self          = new Audio();              // private ctor: OK from static member
+        g_midi_player = new MyMidiPlayer();       // get_midi() surface (leaked singleton)
+    }
+    cron_audio::init();                            // select SoundFont, reset synth
+}
 void   Audio::Destroy() {}
 void   Audio::Init_sfx() {}
 void   Audio::cancel_streams() {}
@@ -150,9 +173,13 @@ void   Audio::resume_audio() {}
 sint32 Audio::copy_and_play_speech(const uint8*, uint32, bool, int) { return -1; }
 sint32 Audio::copy_and_play_sfx(const uint8*, uint32, bool, int) { return -1; }
 sint32 Audio::playSpeechfile(const char*, const char*, bool, int) { return -1; }
-bool   Audio::start_music(int, bool, MyMidiPlayer::ForceType, const std::string&) { return false; }
-bool   Audio::start_music(const std::string&, int, bool, MyMidiPlayer::ForceType) { return false; }
-void   Audio::stop_music() {}
+bool   Audio::start_music(int num, bool continuous, MyMidiPlayer::ForceType force, const std::string& flex) {
+    return cron_audio::start_music(num, continuous, static_cast<cron_audio::Force>(force), flex);
+}
+bool   Audio::start_music(const std::string& fname, int num, bool continuous, MyMidiPlayer::ForceType force) {
+    return cron_audio::start_music(num, continuous, static_cast<cron_audio::Force>(force), fname);
+}
+void   Audio::stop_music() { cron_audio::stop_music(); }
 int    Audio::play_sound_effect(int, int, int, int, int) { return -1; }
 int    Audio::play_sound_effect(int, const Game_object*, int, int) { return -1; }
 int    Audio::play_sound_effect(int, const Tile_coord&, int, int) { return -1; }
@@ -171,22 +198,28 @@ void   Audio::set_audio_enabled(bool) {}
 void   Audio::set_speech_volume(int, bool) {}
 void   Audio::set_sfx_volume(int, bool) {}
 int    Audio::wait_for_speech(std::function<int(Uint32)>) { return 0; }
-MyMidiPlayer* Audio::get_midi() const { return nullptr; }
+MyMidiPlayer* Audio::get_midi() const { return g_midi_player; }
 bool   Audio::have_roland_sfx(Exult_Game, std::string*) { return false; }
 bool   Audio::have_sblaster_sfx(Exult_Game, std::string*) { return false; }
 bool   Audio::have_midi_sfx(std::string*) { return false; }
 bool   Audio::have_config_sfx(const std::string&, std::string*) { return false; }
 
 /* ---- MyMidiPlayer (audio/midi_drivers) --------------------------------- */
+/* Stub ctor: ogg_enabled=true so gamewin.cc's ambient state machine treats us as
+ * a digital-music-capable device and picks background tracks. The real playback
+ * is host-native (cron_audio); the music_driver/ogg members stay inert. */
+MyMidiPlayer::MyMidiPlayer() { ogg_enabled = true; }
 void   MyMidiPlayer::destroyMidiDriver() {}
-bool   MyMidiPlayer::start_music(int, bool, ForceType, std::string) { return false; }
-void   MyMidiPlayer::stop_music(bool) {}
-int    MyMidiPlayer::get_current_track() const { return -1; }
+bool   MyMidiPlayer::start_music(int num, bool repeat, ForceType force, std::string flex) {
+    return cron_audio::start_music(num, repeat, static_cast<cron_audio::Force>(force), flex);
+}
+void   MyMidiPlayer::stop_music(bool) { cron_audio::stop_music(); }
+int    MyMidiPlayer::get_current_track() const { return cron_audio::current_track(); }
 void   MyMidiPlayer::set_repeat(bool) {}
 void   MyMidiPlayer::set_timbre_lib(TimbreLibrary) {}
 void   MyMidiPlayer::set_midi_driver(const std::string&, bool) {}
-void   MyMidiPlayer::SetMidiMusicVolume(int, bool) {}
-int    MyMidiPlayer::GetMidiMusicVolume() { return 0; }
+void   MyMidiPlayer::SetMidiMusicVolume(int vol, bool) { cron_audio::set_music_volume(vol); }
+int    MyMidiPlayer::GetMidiMusicVolume() { return 100; }
 void   MyMidiPlayer::SetOggMusicVolume(int, bool) {}
 bool   MyMidiPlayer::ogg_is_playing() const { return false; }
 bool   MyMidiPlayer::is_mt32() const { return false; }

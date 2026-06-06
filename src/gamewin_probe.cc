@@ -34,6 +34,8 @@
 #include "gumps/Gump_button.h"   /* Gump_button::is_checkmark */
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
+#include "Audio.h"         /* Audio::Init — host-native audio bring-up */
+#include "audio_cron.h"    /* cron_audio::pump — per-frame MIDI sequencer */
 #include "shapevga.h"      /* Shape_manager::paint_text — draw the OSK glyphs */
 #include "singles.h"       /* Game_singletons::sman (reached via a derived helper) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
@@ -129,6 +131,13 @@ void setup(void) {
         gwin->init_files(false);    // Usecode + shape_man->load()
         LOGF("init_files done\n");
 
+        /* Host-native audio bring-up (mirrors exult.cc's early Audio::Init()).
+         * Creates the Audio singleton + selects the host SoundFont; the in-game
+         * ambient-music state machine (run per frame from engine_tick) then drives
+         * cron_audio (XMI -> cron_midi_send). See compat/audio_cron + gamewin_stubs. */
+        Audio::Init();
+        LOGF("Audio::Init done\n");
+
         /* Phase 2: bring the game STATE up (what exult.cc Init() does after
          * init_files: init_gamedat -> read_gwin -> setup_game). The probe
          * bypasses show_menu/new_game, so unpack the initial state ourselves:
@@ -169,6 +178,16 @@ void setup(void) {
 
         gwin->paint();              // composite the world into the 8bpp buffer
         LOGF("paint done\n");
+
+        /* TEMP (audio bring-up verification): kick a known BG background track now
+         * so cron_midi_send fires within the first frames (headless confirms the
+         * syscalls + no trap; user confirms it is AUDIBLE on the desktop host).
+         * The real ambient-music state machine (Background_noise, scheduled +5000ms
+         * virtual) also drives this once enough frames elapse. Track 9 is a BG
+         * background track (gamewin.cc is_background_track 9..12). STRIP once the
+         * ambient path is confirmed. */
+        Audio::get_ptr()->start_music(9, true);
+        LOGF("TEMP start_music(9) issued\n");
 
         /* Spin up the engine coroutine (engine_loop): the live loop runs on its
          * own stack and frame() resumes it each host frame. 4 MB stack (held for
@@ -453,6 +472,11 @@ static void engine_tick(Game_window* gwin) {
     }
 
     gwin->rotatecolours();                   // water/lava palette cycling
+
+    /* Advance the host-native music sequencer: dispatch every XMI event that has
+     * fallen due this frame to the host MIDI synth (cron_midi_send). Mirrors the
+     * DOOM port's I_Cron_UpdateMusic pumped from engine_tick. See compat/audio_cron. */
+    cron_audio::pump();
 }
 
 /* --- On-screen keyboard (OSK) ------------------------------------------------
