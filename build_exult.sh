@@ -141,11 +141,26 @@ if [[ -n "$STATIC_DIR" ]]; then
     MUSIC_MOUNT=("$MUSIC_STAGE" music)
     echo "[build] digital music: $(ls -1 "$MUSIC_STAGE"/*.ogg 2>/dev/null | wc -l) ogg tracks -> <MUSIC>"
   fi
-  echo "[build] baking '$STATIC_DIR' (<STATIC>) + exult*.flx (<DATA>) + music (<MUSIC>) -> build/exult.rom..."
+  # Digital SFX (the same pack's jmsfx.flx — a FLEX of 16-bit WAV sound effects)
+  # baked under <DATA>/jmsfx.flx; cron_audio reads WAV member `num`, downsamples to
+  # 8-bit and triggers a host SPU voice (cron_sample + cron_pcm).
+  SFX_MOUNT=()
+  SFX_STAGE="$ROOT/build/audiopack/jmsfx.flx"
+  if [[ -f "$AUDIO_ZIP" ]]; then
+    if [[ ! -f "$SFX_STAGE" ]]; then
+      echo "[build] extracting digital SFX (jmsfx.flx) from $(basename "$AUDIO_ZIP")..."
+      ( cd "$ROOT/build/audiopack" && unzip -o -q "$AUDIO_ZIP" "jmsfx.flx" ) || {
+        echo "[build] ERROR: extracting jmsfx.flx from audio pack failed." >&2; exit 1; }
+    fi
+    SFX_MOUNT=("$SFX_STAGE" data)
+    echo "[build] digital SFX: jmsfx.flx -> <DATA>"
+  fi
+  echo "[build] baking '$STATIC_DIR' (<STATIC>) + exult*.flx + sfx (<DATA>) + music (<MUSIC>) -> build/exult.rom..."
   "$ROOT/build/exultpak.exe" "$ROOT/build/exult.rom" \
     "$STATIC_DIR" static \
     "$EX/data/exult.flx" data \
     "$EX/data/exult_bg.flx" data \
+    "${SFX_MOUNT[@]+"${SFX_MOUNT[@]}"}" \
     "${MUSIC_MOUNT[@]+"${MUSIC_MOUNT[@]}"}" \
     2> "$ROOT/build/manifest.txt" || {
     echo "[build] ERROR: exultpak bake failed." >&2; exit 1; }

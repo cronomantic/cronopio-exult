@@ -180,18 +180,26 @@ bool   Audio::start_music(const std::string& fname, int num, bool continuous, My
     return cron_audio::start_music(num, continuous, static_cast<cron_audio::Force>(force), fname);
 }
 void   Audio::stop_music() { cron_audio::stop_music(); }
-int    Audio::play_sound_effect(int, int, int, int, int) { return -1; }
-int    Audio::play_sound_effect(int, const Game_object*, int, int) { return -1; }
-int    Audio::play_sound_effect(int, const Tile_coord&, int, int) { return -1; }
+/* Digital SFX -> the host SPU voices (cron_audio). The positional overloads play
+ * centred for now (no distance/balance) — spatialisation is a later refinement. */
+int    Audio::play_sound_effect(int num, int volume, int balance, int repeat, int distance) {
+    return cron_audio::play_sfx(num, volume, balance, repeat, distance);
+}
+int    Audio::play_sound_effect(int num, const Game_object*, int volume, int repeat) {
+    return cron_audio::play_sfx(num, volume, 0, repeat, 0);
+}
+int    Audio::play_sound_effect(int num, const Tile_coord&, int volume, int repeat) {
+    return cron_audio::play_sfx(num, volume, 0, repeat, 0);
+}
 int    Audio::play_sound_effect(const File_spec&, int, int, int, int, int) { return -1; }
-int    Audio::update_sound_effect(int, const Game_object*) { return -1; }
-int    Audio::update_sound_effect(int, const Tile_coord&) { return -1; }
-void   Audio::stop_sound_effect(int) {}
-void   Audio::stop_sound_effects() {}
+int    Audio::update_sound_effect(int chan, const Game_object*) { return chan; }
+int    Audio::update_sound_effect(int chan, const Tile_coord&) { return chan; }
+void   Audio::stop_sound_effect(int chan) { cron_audio::stop_sfx(chan); }
+void   Audio::stop_sound_effects() { cron_audio::stop_all_sfx(); }
 bool   Audio::start_speech(int, bool) { return false; }
 void   Audio::stop_speech() {}
 bool   Audio::is_speech_playing() { return false; }
-bool   Audio::is_sfx_playing(int) { return false; }
+bool   Audio::is_sfx_playing(int num) { return cron_audio::sfx_playing(num); }
 bool   Audio::is_track_playing(int) const { return false; }
 bool   Audio::is_voice_playing() const { return false; }
 void   Audio::set_audio_enabled(bool) {}

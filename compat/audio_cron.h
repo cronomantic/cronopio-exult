@@ -58,6 +58,19 @@ void set_music_volume(int vol0to100);
 bool music_playing();
 int  current_track();
 
+//---- SFX --------------------------------------------------------------------
+// Digital sound effects: WAV member `num` from the baked jmsfx flex
+// (<DATA>/jmsfx.flx), downsampled to 8-bit and triggered on a host SPU voice
+// (cron_sample + cron_pcm). The host mixes/pans/resamples the voices. play_sfx
+// returns the voice/channel (>=0) or -1. Mirrors Audio::play_sound_effect (vol
+// 0..256, balance -256..256, distance attenuation). Decoded PCM is cached (the
+// host references cart memory while a voice plays, so the buffers must persist).
+int  play_sfx(int num, int vol256, int balance, int repeat, int distance);
+void update_sfx(int channel, int vol256, int balance);
+void stop_sfx(int channel);
+void stop_all_sfx();
+bool sfx_playing(int num);
+
 }    // namespace cron_audio
 
 #endif    // CRONOPIO_AUDIO_CRON_H
