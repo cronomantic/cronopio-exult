@@ -35,6 +35,9 @@
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "SDL3/SDL.h"      /* synthetic input events + SDL_GetTicks (shimmed) */
+#include <coro.h>          /* cron_coro_* — run the loop on a coroutine so the
+                            * engine's BLOCKING code (do_modal_gump, fades, …)
+                            * can yield to the host instead of hanging the cart */
 
 extern KeyBinder* keybinder;   /* created + LoadDefaults() in Game_window::init_files */
 
@@ -46,6 +49,20 @@ extern Configuration* config;
 
 /* Kept across setup()->frame() so frame() can present the composited buffer. */
 static Game_window* g_gwin = nullptr;
+
+/* --- Engine coroutine (see engine_loop / frame). -----------------------------
+ * The Cronopio cart model is one frame() per host frame that must return fast,
+ * but Exult drives BLOCKING loops (do_modal_gump, the char-naming screen, palette
+ * fades) that run their OWN paint+event loop until done — impossible in a single
+ * frame() call. So the engine's live loop runs on a cooperative coroutine: frame()
+ * resumes it, it runs ONE iteration and yields back (one host frame). The blocking
+ * engine loops yield at SDL_Delay (the shim yields the coroutine there too), so
+ * they advance one host frame per iteration instead of hanging — Exult's native
+ * control flow runs unmodified, no fork patch (fork-patch-policy). [[cronovm-coro-design]] */
+static cron_coro_t g_host   = {};     /* host frame()'s context (zero-init "main") */
+static cron_coro_t g_engine = {};     /* the engine loop's context                */
+static bool        g_engine_ready = false;
+static void        engine_loop(void*);    /* fwd decl (defined after run_input) */
 
 static char lbuf[256];
 #define LOGF(...)                                                  \
@@ -149,8 +166,23 @@ void setup(void) {
 
         gwin->paint();              // composite the world into the 8bpp buffer
         LOGF("paint done\n");
-        /* Success: RETURN (don't cron_exit) so frame() presents the painted
-         * world to CRON_FB each host frame. */
+
+        /* Spin up the engine coroutine (engine_loop): the live loop runs on its
+         * own stack and frame() resumes it each host frame. 4 MB stack (held for
+         * the whole run) — deep enough for paint + usecode + (later) do_modal_gump.
+         * The init runs HERE on the main stack (it doesn't block); only the live
+         * loop moves onto the coroutine. */
+        const uint32_t CORO_STK = 4u * 1024u * 1024u;
+        g_engine.fn       = engine_loop;
+        g_engine.arg      = nullptr;
+        g_engine.stack_lo = new unsigned char[CORO_STK];
+        g_engine.stack_sz = CORO_STK;
+        cron_coro_init(&g_engine);
+        g_engine_ready    = true;
+        LOGF("engine coroutine ready (stack=%p)\n", g_engine.stack_lo);
+
+        /* Success: RETURN (don't cron_exit) so frame() drives the engine loop
+         * (which presents the painted world to CRON_FB each host frame). */
         return;
     } catch (const std::exception& e) {
         LOGF("gamewin_probe: CAUGHT std::exception: %s\n", e.what());
@@ -372,28 +404,22 @@ static void run_input(Game_window* gwin) {
     g_walking = walking;
 }
 
-/* Live per-frame game loop. Mirrors the core of exult.cc Handle_events() (minus
- * lerp, a later slice): un-draw the cursor, read input, advance the clock, run the
- * time queue (terrain animation, NPC schedules, usecode), update gumps, repaint the
- * dirty regions, cycle the palette, then re-draw the cursor. The host ms clock
- * (SDL_GetTicks) advances ~16 ms per cart frame in headless / real wall-clock on
- * desktop, so the world advances in real-ish time. The composited 8bpp buffer is
- * then presented to CRON_FB cart-side (no engine show()/present patch — see
- * fork-patch-policy). */
-void frame(void) {
-    if (!g_gwin) {
-        return;
-    }
-    Game_window* gwin = g_gwin;
-    Mouse*       cursor = Mouse::mouse();
+/* ONE iteration of the live loop. Mirrors the core of exult.cc Handle_events()
+ * (minus lerp): un-draw the cursor, read input, advance the clock, run the time
+ * queue (terrain animation, NPC schedules, usecode), update gumps, repaint the
+ * dirty regions, cycle the palette, re-draw the cursor, present. The host ms clock
+ * (SDL_GetTicks) advances ~16 ms per cart frame, so the world advances in real-ish
+ * time. The composited 8bpp buffer is presented to CRON_FB cart-side (no engine
+ * show()/present patch — fork-patch-policy). */
+static void engine_tick(Game_window* gwin) {
+    Mouse* cursor = Mouse::mouse();
 
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
 
-    /* Mirror exult.cc: HIDE the cursor at the top of the loop — restore the pixels
-     * it saved last frame so this frame's paint starts clean (the first call is a
-     * no-op; show() sets `onscreen`). The cursor's own position is updated by the
-     * MOUSE_MOTION events drained in run_input below (Mouse::move). */
+    /* Mirror exult.cc: HIDE the cursor at the top — restore the pixels it saved
+     * last frame so this frame's paint starts clean (first call no-ops via the
+     * `onscreen` guard). Position tracks the MOUSE_MOTION events in run_input. */
     if (cursor) {
         cursor->hide();
     }
@@ -406,9 +432,9 @@ void frame(void) {
         gwin->paint_dirty();                 // repaint only the changed regions
     }
 
-    /* Re-DRAW the engine cursor (the U7 pointer) into the 8bpp buffer on top of the
-     * painted world, mirroring exult.cc's Mouse::show() before the blit. No
-     * blit_dirty() — vid_present blits the whole buffer (with the cursor) each frame. */
+    /* Re-DRAW the engine cursor (U7 pointer) on top of the painted world, mirroring
+     * exult.cc's Mouse::show() before the blit. No blit_dirty() — vid_present blits
+     * the whole buffer (cursor included) each frame. */
     if (cursor) {
         cursor->show();
     }
@@ -419,5 +445,25 @@ void frame(void) {
     Image_buffer8* ib = w->get_ib8();
     vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
                 (int)ib->get_line_width(), w->get_palette());
+}
+
+/* The engine coroutine: run the live loop forever, yielding to the host once per
+ * iteration. Runs on its own stack (set up in setup()). Yielding here is the same
+ * yield point Exult's blocking loops will reach via SDL_Delay (next slice), so the
+ * loop body and a nested do_modal_gump both advance one host frame per turn. */
+static void engine_loop(void*) {
+    for (;;) {
+        engine_tick(g_gwin);
+        cron_coro_yield(&g_engine);          // -> host frame() (one host frame)
+    }
+}
+
+/* Host entry each frame: resume the engine coroutine; it runs to its next yield
+ * (one engine_tick, or — once SDL_Delay yields — one turn of a blocking loop). */
+void frame(void) {
+    if (!g_gwin || !g_engine_ready) {
+        return;
+    }
+    cron_coro_swap(&g_host, &g_engine);
 }
 CRONOPIO_CART_INIT(setup, frame)
