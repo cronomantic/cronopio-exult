@@ -140,6 +140,11 @@ void setup(void) {
          * to outlive setup() into frame() (never deleted — lives for the run). */
         new Mouse(gwin);
         Mouse::mouse()->set_shape(Mouse::hand);
+        /* Hide the host OS cursor now that the engine draws its own U7 pointer
+         * (frame() show()/hide()) — mirrors exult.cc Play()'s SDL_HideCursor(),
+         * which our SDL shim doesn't honour. cron_cursor is a no-op on headless
+         * (no OS cursor) and hides the SDL cursor on the desktop host. */
+        cron_cursor(0);
         LOGF("engine cursor ready (Mouse::mouse=%p)\n", (void*)Mouse::mouse());
 
         gwin->paint();              // composite the world into the 8bpp buffer
@@ -368,20 +373,30 @@ static void run_input(Game_window* gwin) {
 }
 
 /* Live per-frame game loop. Mirrors the core of exult.cc Handle_events() (minus
- * mouse / lerp, which are later slices): read input, advance the clock, run the time
- * queue (terrain animation, NPC schedules, usecode), update gumps, repaint the
- * dirty regions, and cycle the palette. The host ms clock (SDL_GetTicks) advances
- * ~16 ms per cart frame in headless / real wall-clock on desktop, so the world
- * advances in real-ish time. The composited 8bpp buffer is then presented to
- * CRON_FB cart-side (no engine show()/present patch — see fork-patch-policy). */
+ * lerp, a later slice): un-draw the cursor, read input, advance the clock, run the
+ * time queue (terrain animation, NPC schedules, usecode), update gumps, repaint the
+ * dirty regions, cycle the palette, then re-draw the cursor. The host ms clock
+ * (SDL_GetTicks) advances ~16 ms per cart frame in headless / real wall-clock on
+ * desktop, so the world advances in real-ish time. The composited 8bpp buffer is
+ * then presented to CRON_FB cart-side (no engine show()/present patch — see
+ * fork-patch-policy). */
 void frame(void) {
     if (!g_gwin) {
         return;
     }
     Game_window* gwin = g_gwin;
+    Mouse*       cursor = Mouse::mouse();
 
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
+
+    /* Mirror exult.cc: HIDE the cursor at the top of the loop — restore the pixels
+     * it saved last frame so this frame's paint starts clean (the first call is a
+     * no-op; show() sets `onscreen`). The cursor's own position is updated by the
+     * MOUSE_MOTION events drained in run_input below (Mouse::move). */
+    if (cursor) {
+        cursor->hide();
+    }
 
     run_input(gwin);                         // native event dispatch (pad+mouse)
 
@@ -390,6 +405,14 @@ void frame(void) {
     if (gwin->is_dirty()) {
         gwin->paint_dirty();                 // repaint only the changed regions
     }
+
+    /* Re-DRAW the engine cursor (the U7 pointer) into the 8bpp buffer on top of the
+     * painted world, mirroring exult.cc's Mouse::show() before the blit. No
+     * blit_dirty() — vid_present blits the whole buffer (with the cursor) each frame. */
+    if (cursor) {
+        cursor->show();
+    }
+
     gwin->rotatecolours();                   // water/lava palette cycling
 
     Image_window8* w  = gwin->get_win();
