@@ -138,6 +138,28 @@ if [[ -n "$STATIC_DIR" ]]; then
       ( cd "$MUSIC_STAGE" && unzip -j -o -q "$AUDIO_ZIP" "music/*.ogg" ) || {
         echo "[build] ERROR: extracting music from audio pack failed." >&2; exit 1; }
     fi
+    # Loudness-normalise the pack. The official 2002 exult_audio.zip has wildly
+    # inconsistent track levels (e.g. 06bg "Trinsic" sits at RMS -55 dB = inaudible
+    # while 35bg "Fellowship" is -25 dB), so some tracks seem not to play at all.
+    # Pass each ogg through ffmpeg loudnorm (EBU R128, I=-18 LUFS, TP=-1.5) so every
+    # track lands at a consistent, audible level. One-time (sentinel-guarded), run
+    # in parallel; skipped (with a warning) if ffmpeg is unavailable.
+    NORM_DONE="$MUSIC_STAGE/.loudnorm-done"
+    if [[ ! -f "$NORM_DONE" ]]; then
+      if command -v ffmpeg >/dev/null 2>&1; then
+        echo "[build] loudness-normalising $(ls -1 "$MUSIC_STAGE"/*.ogg | wc -l) music tracks (ffmpeg loudnorm I=-18)..."
+        ls "$MUSIC_STAGE"/*.ogg | xargs -P 6 -I{} bash -c '
+          f="$1"; t="$f.norm.ogg"
+          if ffmpeg -hide_banner -loglevel error -y -i "$f" \
+               -af loudnorm=I=-18:TP=-1.5:LRA=11 -ar 22050 -ac 2 \
+               -c:a libvorbis -q:a 5 "$t"; then mv -f "$t" "$f"; else rm -f "$t"; echo "[build] WARN: loudnorm failed for $f (left as-is)" >&2; fi
+          ' _ {}
+        touch "$NORM_DONE"
+        echo "[build] music normalised."
+      else
+        echo "[build] WARNING: ffmpeg not found — music left un-normalised (some tracks may be near-silent)." >&2
+      fi
+    fi
     MUSIC_MOUNT=("$MUSIC_STAGE" music)
     echo "[build] digital music: $(ls -1 "$MUSIC_STAGE"/*.ogg 2>/dev/null | wc -l) ogg tracks -> <MUSIC>"
   fi

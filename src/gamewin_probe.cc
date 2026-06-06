@@ -158,50 +158,37 @@ void setup(void) {
          * init_gamedat(true) restores <STATIC>/initgame.dat into <GAMEDAT>
          * (RAM-FS). Then read_gwin (gamewin.dat) + setup_game (terrain + NPCs +
          * usecode + eggs). Breadcrumb each step to localise the next wall. */
-        gwin->init_gamedat(true);
-        LOGF("init_gamedat done\n");
-        gwin->read_gwin();
-        LOGF("read_gwin done\n");
-        /* Start POST-intro: skip_intro -> setup_game sets the did_first_scene
-         * usecode flag, which makes the avatar visible AND the game-start/intro
-         * eggs inert (their usecode plays the intro cutscene + blocks, which the
-         * one-frame cart model can't drive). Without this, the start egg's hatch
-         * runs the intro usecode and hangs (egg i=1 at the BG start tile). */
-        config->set("config/gameplay/skip_intro", "yes", false);
-        gwin->setup_game(false);    // terrain + NPCs + usecode + eggs
-        LOGF("setup_game done\n");
-
-        /* Engine cursor — REQUIRED before any gump/mouse INTERACTION (not just
-         * the cursor-rendering slice): the gump-click path dereferences
-         * Mouse::mouse() throughout (Gump_manager::double_clicked,
-         * Game_window::start_dragging via Dragging_info, set_speed_cursor). So
-         * the Mouse must exist before clicks; its on-screen RENDERING (show/hide
-         * around paint) is still a later slice — here it only backs input/hit
-         * tests + speed cursor. Mirrors exult.cc Play()'s `Mouse mouse(gwin)`:
-         * loads <STATIC>/pointers.shp (case-insensitive ROM find of POINTERS.SHP)
-         * and MakeCurrent()s itself so Mouse::mouse() returns it. Heap-allocated
-         * to outlive setup() into frame() (never deleted — lives for the run). */
+        /* Engine cursor — created BEFORE read() (which ends with Mouse::mouse()->
+         * set_speed_cursor()) and before any gump/mouse interaction (the gump-click
+         * path derefs Mouse::mouse() throughout). Loads <STATIC>/pointers.shp and
+         * MakeCurrent()s itself; heap-allocated to outlive setup() (never deleted).
+         * cron_cursor(0) hides the host OS cursor (the engine draws its own U7 pointer
+         * in exult_engine_yield). */
         new Mouse(gwin);
         Mouse::mouse()->set_shape(Mouse::hand);
-        /* Hide the host OS cursor now that the engine draws its own U7 pointer
-         * (frame() show()/hide()) — mirrors exult.cc Play()'s SDL_HideCursor(),
-         * which our SDL shim doesn't honour. cron_cursor is a no-op on headless
-         * (no OS cursor) and hides the SDL cursor on the desktop host. */
         cron_cursor(0);
         LOGF("engine cursor ready (Mouse::mouse=%p)\n", (void*)Mouse::mouse());
 
+        /* Bring the game STATE up via Game_window::read() — Exult's canonical load
+         * path — NOT read_gwin()+setup_game() manually: read() ALSO SCHEDULES the
+         * Background_noise music state machine (tqueue +5000ms), which read_gwin alone
+         * does not, so the scene-appropriate ambient track (Trinsic daytime = track 6,
+         * dungeon/night/weather as appropriate) auto-starts. read() = cancel_streams +
+         * load palette + clear_world + schedule background_noise + read_gwin +
+         * setup_game(cheat.in_map_editor()=false). init_gamedat(true) first restores
+         * <STATIC>/initgame.dat into <GAMEDAT>; skip_intro makes the start/intro eggs
+         * inert (their usecode plays the intro cutscene + blocks the one-frame cart). */
+        gwin->init_gamedat(true);
+        LOGF("init_gamedat done\n");
+        config->set("config/gameplay/skip_intro", "yes", false);
+        gwin->read();
+        LOGF("read() done (game state + Background_noise scheduled)\n");
+
         gwin->paint();              // composite the world into the 8bpp buffer
         LOGF("paint done\n");
-
-        /* TEMP (audio bring-up verification): kick a known BG background track now
-         * so cron_midi_send fires within the first frames (headless confirms the
-         * syscalls + no trap; user confirms it is AUDIBLE on the desktop host).
-         * The real ambient-music state machine (Background_noise, scheduled +5000ms
-         * virtual) also drives this once enough frames elapse. Track 9 is a BG
-         * background track (gamewin.cc is_background_track 9..12). STRIP once the
-         * ambient path is confirmed. */
-        Audio::get_ptr()->start_music(9, true);
-        LOGF("TEMP start_music(9) issued\n");
+        /* Music now starts NATIVELY: the Background_noise state machine scheduled by
+         * read() above fires ~5s in and picks the scene track (Trinsic = track 6). No
+         * forced TEMP start_music — the engine drives it like real Exult. */
 
         /* Spin up the engine coroutine (engine_loop): the live loop runs on its
          * own stack and frame() resumes it each host frame. 4 MB stack (held for
@@ -458,17 +445,8 @@ static void run_input(Game_window* gwin) {
  * time. The composited 8bpp buffer is presented to CRON_FB cart-side (no engine
  * show()/present patch — fork-patch-policy). */
 static void engine_tick(Game_window* gwin) {
-    Mouse* cursor = Mouse::mouse();
-
     const unsigned int ticks = (unsigned int)SDL_GetTicks();
     Game::set_ticks(ticks);
-
-    /* Mirror exult.cc: HIDE the cursor at the top — restore the pixels it saved
-     * last frame so this frame's paint starts clean (first call no-ops via the
-     * `onscreen` guard). Position tracks the MOUSE_MOTION events in run_input. */
-    if (cursor) {
-        cursor->hide();
-    }
 
     run_input(gwin);                         // native event dispatch (pad+mouse)
 
@@ -478,12 +456,11 @@ static void engine_tick(Game_window* gwin) {
         gwin->paint_dirty();                 // repaint only the changed regions
     }
 
-    /* Re-DRAW the engine cursor (U7 pointer) on top of the painted world, mirroring
-     * exult.cc's Mouse::show() before the blit. No blit_dirty() — vid_present blits
-     * the whole buffer (cursor included) each frame. */
-    if (cursor) {
-        cursor->show();
-    }
+    /* The engine cursor is drawn at the SINGLE present point (exult_engine_yield),
+     * NOT here: a blocking loop (Get_click / do_modal_gump) runs INSIDE engine_tick
+     * and presents via that yield, so drawing the cursor here would leave it hidden
+     * throughout the dialogue/modal. exult_engine_yield does show->present->hide each
+     * frame, so the U7 pointer is visible in the normal loop AND every blocking loop. */
 
     gwin->rotatecolours();                   // water/lava palette cycling
 
@@ -633,10 +610,28 @@ extern "C" void exult_engine_yield(void) {
         if (g_osk_active) {
             osk_draw_and_drive(g_gwin);
         }
+        /* Draw the engine cursor (U7 pointer) on top, at the live mouse position,
+         * then restore its background after presenting — so it is visible in the
+         * normal loop AND every blocking loop (dialogue Get_click / modal gump), and
+         * the next paint starts clean. The position comes from the shim's
+         * SDL_GetMouseState (current cron_mouse), so it tracks even while run_input is
+         * frozen inside a blocking loop. */
+        Mouse* cur = Mouse::mouse();
+        if (cur) {
+            float fx = 0.0f, fy = 0.0f;
+            SDL_GetMouseState(&fx, &fy);
+            int gx, gy;
+            g_gwin->get_win()->screen_to_game((int)fx, (int)fy, g_gwin->get_fastmouse(), gx, gy);
+            cur->move(gx, gy);
+            cur->show();
+        }
         Image_window8* w  = g_gwin->get_win();
         Image_buffer8* ib = w->get_ib8();
         vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
                     (int)ib->get_line_width(), w->get_palette());
+        if (cur) {
+            cur->hide();
+        }
     }
     cron_coro_yield(&g_engine);              // -> host frame() (one host frame)
 }

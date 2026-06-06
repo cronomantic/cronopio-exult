@@ -35,6 +35,9 @@
 #include "tiles.h"        /* Tile_coord / TileRect (2D sound position) */
 #include "objs/objs.h"    /* Game_object::get_tile (positional play_sound_effect) */
 #include "actors.h"       /* Actor (get_camera_actor()->get_lift()) */
+#include "mouse.h"        /* Mouse (Get_click cursor) */
+#include "gumps/gump_utils.h"  /* Delay() — yields the coroutine in Get_click's wait */
+#include "SDL3/SDL.h"     /* SDL_PollEvent / event types (Get_click) */
 #include <cstring>        /* strcmp */
 #include <memory>
 #include <optional>
@@ -232,12 +235,15 @@ int    Audio::update_sound_effect(int chan, const Game_object* obj) {
 }
 void   Audio::stop_sound_effect(int chan) { cron_audio::stop_sfx(chan); }
 void   Audio::stop_sound_effects() { cron_audio::stop_all_sfx(); }
-bool   Audio::start_speech(int, bool) { return false; }
-void   Audio::stop_speech() {}
-bool   Audio::is_speech_playing() { return false; }
+/* Digital voice (VOC speech) -> a dedicated host voice (cron_audio). speech_id
+ * (the member get_speech_id() returns) is set through `this` since the stub runs
+ * on the real Audio singleton. */
+bool   Audio::start_speech(int num, bool wait) { speech_id = cron_audio::start_speech(num, wait); return speech_id >= 0; }
+void   Audio::stop_speech() { cron_audio::stop_speech(); speech_id = -1; }
+bool   Audio::is_speech_playing() { return cron_audio::speech_playing(); }
 bool   Audio::is_sfx_playing(int num) { return cron_audio::sfx_playing(num); }
 bool   Audio::is_track_playing(int) const { return false; }
-bool   Audio::is_voice_playing() const { return false; }
+bool   Audio::is_voice_playing() const { return cron_audio::speech_playing(); }
 void   Audio::set_audio_enabled(bool) {}
 void   Audio::set_speech_volume(int, bool) {}
 void   Audio::set_sfx_volume(int, bool) {}
@@ -323,7 +329,55 @@ bool Translate_keyboard(const SDL_Event& e, SDL_Keycode& chr, SDL_Keycode& unico
 bool SaveIMG_RW(SDL_Surface*, SDL_IOStream*, bool, int) { return false; }
 
 /* ---- exult.cc (main TU, excluded) -------------------------------------- */
-bool Get_click(int&, int&, Mouse::Mouse_shapes, char*, bool, Paintable*, bool) { return false; }
+/* Get_click — block until the player clicks (or presses a key). Conversations use
+ * it to wait between spoken lines (the start_speech intrinsic shows the NPC face
+ * then Get_click); the old stub returned immediately, so dialogue never paused and
+ * speech re-triggered endlessly. Reimplemented faithfully (exult.cc isn't compiled)
+ * as a Delay()-driven wait: Delay() yields the engine coroutine (presenting one host
+ * frame, like every Exult blocking loop), and SDL_PollEvent drains the synthetic
+ * pad/mouse events the shim regenerates each frame. The tqueue is paused so the world
+ * freezes while waiting. No fork patch. */
+bool Get_click(int& x, int& y, Mouse::Mouse_shapes shape, char* chr, bool /*drag_ok*/, Paintable* paint, bool /*rotate*/) {
+    if (chr) {
+        *chr = 0;
+    }
+    Game_window* gwin = Game_window::get_instance();
+    Mouse*       m    = Mouse::mouse();
+    const Mouse::Mouse_shapes saveshape = m ? m->get_shape() : Mouse::hand;
+    if (m && shape != Mouse::dontchange) {
+        m->set_shape(shape);
+    }
+    if (paint) {
+        paint->paint();
+    }
+    gwin->get_tqueue()->pause(Game::get_ticks());
+    bool ret = false, done = false;
+    while (!done) {
+        Delay();    // yield one host frame (coroutine present) + snapshot input
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                gwin->get_win()->screen_to_game(e.button.x, e.button.y, gwin->get_fastmouse(), x, y);
+                ret  = (e.button.button != 3);    // right-click cancels
+                done = true;
+                break;
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN) {    // a key (or pad action) also advances
+                if (chr) {
+                    *chr = (char)e.key.key;
+                }
+                ret  = (e.key.key != SDLK_ESCAPE);
+                done = true;
+                break;
+            }
+        }
+    }
+    gwin->get_tqueue()->resume(Game::get_ticks());
+    if (m && shape != Mouse::dontchange) {
+        m->set_shape(saveshape);
+    }
+    return ret;
+}
 void make_screenshot(bool) {}
 void Wait_for_arrival(Actor*, const Tile_coord&, long) {}
 void Wizard_eye(long) {}

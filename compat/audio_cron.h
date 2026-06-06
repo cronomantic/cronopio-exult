@@ -73,6 +73,16 @@ void stop_sfx(int channel);
 void stop_all_sfx();
 bool sfx_playing(int num);
 
+//---- Speech -----------------------------------------------------------------
+// Digital voice: VOC member `num` from the game's speech flex (u7speech.spc for
+// Black Gate / sispeech.spc for Serpent Isle), decoded to 8-bit and played on a
+// dedicated host voice (the listener polls speech_playing). Returns the instance
+// id (>=0) or -1. `wait` is ignored (the VM is cooperative; no blocking here).
+int  start_speech(int num, bool wait);
+void stop_speech();
+bool speech_playing();
+int  speech_id();
+
 }    // namespace cron_audio
 
 #endif    // CRONOPIO_AUDIO_CRON_H
