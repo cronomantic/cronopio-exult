@@ -67,6 +67,74 @@ static void rle_blit_sw(unsigned char* bits, int line_width,
                         int clipx, int clipy, int clipw, int cliph,
                         int xoff, int yoff, const unsigned char* inptr);
 
+/* ---------------------------------------------------------------------------
+ * TRANSLUCENCY OFFLOAD (Cronopio, roadmap item 1 slice 2b): route the per-pixel
+ * translucent compositing (copy_hline_translucent8 — the hot path that
+ * Shape_frame::paint_rle_translucent drives) through the host's blend-aware
+ * buffer blit (cron_blt_buf_blend) instead of running the lookup loop as VM
+ * bytecode. Same rationale as slice 2: native on weak targets, neutral on desktop.
+ *
+ * Exult's model: for a source index s in [first,last], out = xforms[s-first][dst];
+ * other indices copy opaque (out = s). That is EXACTLY a 256x256 blend LUT
+ * (out = lut[s*256 + dst]) once we fill the translucent rows from the xform
+ * tables and the rest with an identity (passthrough) row. We build that combined
+ * LUT once per distinct xform-table set, register it as a host blend slot
+ * (cron_blend_table), and a single blend blit then handles opaque + translucent
+ * in one pass — pixel-identical to the software loop.
+ * ------------------------------------------------------------------------- */
+namespace {
+
+struct BlendLut {
+    const void*    key   = nullptr;   // cache key: the xforms table pointer
+    int            first = 0, last = 0;
+    int            slot  = 0;         // assigned host blend slot (1..7); 0 = none
+    unsigned char* lut   = nullptr;   // 64 KB combined LUT (lives in cart heap)
+};
+
+// One cache entry per host blend slot (CRON_BLEND_SLOT_MAX == 7).
+BlendLut g_blend_luts[CRON_BLEND_SLOT_MAX];
+int      g_next_blend_slot = 1;       // next free slot to hand out (1..7)
+
+// Build (or look up) the combined blend LUT for Exult's xform tables and return
+// its host blend slot (1..7), or 0 if none can be offloaded (out of slots / OOM)
+// — the caller then falls back to the software loop. `xforms[k]` is a 256-byte
+// Xform_palette; the array is (last-first+1) tables, contiguous.
+int blend_lut_slot(const Xform_palette* xforms, int first, int last) {
+    if (!xforms || last < first) {
+        return 0;
+    }
+    for (int i = 0; i < CRON_BLEND_SLOT_MAX; ++i) {
+        const BlendLut& e = g_blend_luts[i];
+        if (e.slot && e.key == xforms && e.first == first && e.last == last) {
+            return e.slot;
+        }
+    }
+    if (g_next_blend_slot > CRON_BLEND_SLOT_MAX) {
+        return 0;                                  // all slots taken -> software
+    }
+    unsigned char* lut = static_cast<unsigned char*>(std::malloc(65536));
+    if (!lut) {
+        return 0;
+    }
+    const unsigned char* xf = reinterpret_cast<const unsigned char*>(xforms);
+    for (int s = 0; s < 256; ++s) {
+        unsigned char* row = lut + static_cast<size_t>(s) * 256;
+        if (s >= first && s <= last) {
+            std::memcpy(row, xf + static_cast<size_t>(s - first) * 256, 256);
+        } else {
+            std::memset(row, (unsigned char)s, 256);   // identity = opaque copy
+        }
+    }
+    const int slot = g_next_blend_slot++;
+    BlendLut& e = g_blend_luts[slot - 1];
+    std::free(e.lut);
+    e.key = xforms; e.first = first; e.last = last; e.slot = slot; e.lut = lut;
+    cron_blend_table(slot, lut);                   // host stores the heap offset
+    return slot;
+}
+
+}  // namespace
+
 /*
  *  Copy an area of the image within itself.
  */
@@ -451,8 +519,19 @@ void Image_buffer8::copy_hline_translucent8(
 	if (!clip_x(srcx, srcw, destx, desty)) {
 		return;
 	}
-	unsigned char*       to   = bits + desty * line_width + destx;
 	const unsigned char* from = src_pixels + srcx;
+	// Offload: a combined blend LUT (translucent rows from xforms, the rest
+	// identity) makes a single host blend blit reproduce the loop below exactly
+	// — opaque indices pass through, translucent ones composite against dst.
+	// colkey = -1: every pixel is written (this primitive has no transparency).
+	const int slot = blend_lut_slot(xforms, first_translucent, last_translucent);
+	if (slot) {
+		cron_blt_buf_blend(bits, get_width(), get_height(), line_width,
+		                   from, srcw, destx, desty, srcw, 1, /*colkey*/ -1, slot);
+		return;
+	}
+	// Fallback: upstream per-pixel software path.
+	unsigned char* to = bits + desty * line_width + destx;
 	for (int i = srcw; i; i--) {
 		// Get char., and transform.
 		unsigned char c = Read1(from);
