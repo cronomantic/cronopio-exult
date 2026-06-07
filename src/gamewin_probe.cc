@@ -33,6 +33,8 @@
 #include "gumps/Gump.h"          /* Gump::on_button (gump-button hit test) */
 #include "gumps/Gump_button.h"   /* Gump_button::is_checkmark */
 #include "mouse.h"         /* Mouse (engine cursor) + *_speed_factor statics */
+#include "ibuf8.h"         /* Image_buffer8 — scratch buffer for the host cursor */
+#include "vgafile.h"       /* Shape_frame — the cursor RLE we composite on the host */
 #include "keys.h"          /* KeyBinder (native action dispatch) */
 #include "Audio.h"         /* Audio::Init — host-native audio bring-up */
 #include "audio_cron.h"    /* cron_audio::pump — per-frame MIDI sequencer */
@@ -55,6 +57,73 @@ extern Configuration* config;
 
 /* Kept across setup()->frame() so frame() can present the composited buffer. */
 static Game_window* g_gwin = nullptr;
+
+/* --- Host cursor overlay (graphics offload, roadmap item 1) ------------------
+ * The U7 pointer was composited INTO the 8bpp buffer by Mouse::show(), whose
+ * save-behind (Image_buffer8::get of the maxw×maxh backup box — sized to the
+ * LARGEST cursor, the big speed-arrows) was ~41% of all per-frame VM time even
+ * for the tiny hand, because get() copies that whole box per-pixel every frame.
+ * Instead we leave the cursor OUT of the engine buffer and overlay it on the host
+ * GPU: decode the current cursor Shape_frame into a small color-keyed scratch
+ * (cached by frame#), register it as a cron_image, and cron_blt it onto CRON_FB
+ * AFTER the buffer blit. No save-behind, no fork patch, no new syscall — the host
+ * does the per-pixel work (the VM-as-orchestrator goal for weak targets).
+ *
+ * CartMouse subclasses Mouse only to reach the protected cur/cur_framenum/mousex/
+ * mousey (the engine sets the frame via set_speed_cursor; we just read it). The
+ * cart creates the singleton as a CartMouse, so Mouse::mouse() returns one. */
+class CartMouse : public Mouse {
+public:
+    using Mouse::Mouse;
+
+    /* Composite the current pointer onto CRON_FB via the host. Call AFTER
+     * vid_present (so it sits on top of the presented frame). */
+    void blit_host_cursor() {
+        Shape_frame* f = cur;
+        if (!f || f->is_empty()) {
+            return;
+        }
+        const int w = f->get_width();
+        const int h = f->get_height();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        /* Scratch holds the decoded cursor (line_width == w, tightly packed for
+         * cron_image). Grown on demand; re-decoded only when the frame# changes
+         * (the shape switches between hand / speed-arrows rarely). 255 = the
+         * transparent colour-key (RLE skip-runs stay at the pre-fill value). */
+        static Image_buffer8* scratch    = nullptr;
+        static int            scratch_w  = 0;
+        static int            scratch_h  = 0;
+        static int            cached_fn  = -1;
+        const int             COLKEY     = 255;
+        if (!scratch || w > scratch_w || h > scratch_h) {
+            delete scratch;
+            scratch   = new Image_buffer8(w, h);
+            scratch_w = w;
+            scratch_h = h;
+            cached_fn = -1;     // force a re-decode into the new buffer
+        }
+        if (cur_framenum != cached_fn) {
+            std::memset(scratch->get_bits(), COLKEY,
+                        (size_t)scratch->get_line_width() * (size_t)h);
+            /* paint the frame with its origin at (xleft,yabove) so the bitmap's
+             * top-left lands at (0,0) of the scratch. */
+            f->paint_rle(scratch, f->get_xleft(), f->get_yabove());
+            cached_fn = cur_framenum;
+        }
+        cron_image(CRON_CURSOR_SLOT, scratch->get_bits(), w, h);
+        /* Screen==game coords (Game_window uses Image_window::Fill, identity), so
+         * the FB position is the engine mouse pos minus the frame's hotspot. */
+        cron_blt(CRON_CURSOR_SLOT, mousex - f->get_xleft(), mousey - f->get_yabove(),
+                 0, 0, w, h, COLKEY);
+    }
+
+private:
+    /* Image slot for the cursor. The cart uses no other cron_image slots yet
+     * (the world still software-composites); slice 2 will pick distinct slots. */
+    enum { CRON_CURSOR_SLOT = 0 };
+};
 
 /* --- Engine coroutine (see engine_loop / frame). -----------------------------
  * The Cronopio cart model is one frame() per host frame that must return fast,
@@ -164,7 +233,7 @@ void setup(void) {
          * MakeCurrent()s itself; heap-allocated to outlive setup() (never deleted).
          * cron_cursor(0) hides the host OS cursor (the engine draws its own U7 pointer
          * in exult_engine_yield). */
-        new Mouse(gwin);
+        new CartMouse(gwin);    // CartMouse so Mouse::mouse() can host-overlay
         Mouse::mouse()->set_shape(Mouse::hand);
         cron_cursor(0);
         LOGF("engine cursor ready (Mouse::mouse=%p)\n", (void*)Mouse::mouse());
@@ -616,21 +685,35 @@ extern "C" void exult_engine_yield(void) {
          * the next paint starts clean. The position comes from the shim's
          * SDL_GetMouseState (current cron_mouse), so it tracks even while run_input is
          * frozen inside a blocking loop. */
-        Mouse* cur = Mouse::mouse();
+        /* Update the engine cursor POSITION (for hit-testing + speed-arrow
+         * selection, and so it tracks the mouse even while run_input is frozen in
+         * a blocking loop). In NORMAL play the cursor is overlaid on the host AFTER
+         * the present (blit_host_cursor), with NO Mouse::show()/hide() — that drops
+         * the save-behind (Image_buffer8::get, ~41% of the frame). INSIDE a modal,
+         * do_modal_gump composites the cursor itself, so we keep the legacy
+         * buffer-composite path there (move+show / present / hide) and skip the host
+         * overlay to avoid drawing the pointer twice. */
+        CartMouse* cur = static_cast<CartMouse*>(Mouse::mouse());
         if (cur) {
             float fx = 0.0f, fy = 0.0f;
             SDL_GetMouseState(&fx, &fy);
             int gx, gy;
             g_gwin->get_win()->screen_to_game((int)fx, (int)fy, g_gwin->get_fastmouse(), gx, gy);
             cur->move(gx, gy);
-            cur->show();
+            if (modal) {
+                cur->show();    // legacy in-buffer composite (do_modal_gump owns it)
+            }
         }
         Image_window8* w  = g_gwin->get_win();
         Image_buffer8* ib = w->get_ib8();
         vid_present(ib->get_bits(), (int)ib->get_width(), (int)ib->get_height(),
                     (int)ib->get_line_width(), w->get_palette());
         if (cur) {
-            cur->hide();
+            if (modal) {
+                cur->hide();                // restore buffer after present (legacy)
+            } else {
+                cur->blit_host_cursor();    // host GPU overlay (no save-behind)
+            }
         }
     }
     cron_coro_yield(&g_engine);              // -> host frame() (one host frame)
