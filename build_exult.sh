@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Build the Cronopio Exult cartridge (Exult / Ultima VII -> Cronopio .crom).
 #
-# BRING-UP STATUS: slice 1 (files/ + ROM-FS) is in — Exult's REAL file layer
-# (files/utils.cc) now runs on the VM, redirected to Cronopio storage. This
-# script preps the Cronopio C++ toolchain (picolibc --with-locale + cxxio.bc),
-# builds our generic CronoFS bake tool (tools/exultpak), and — given a deployed
-# game STATIC dir — bakes it into a ROM and builds the files probe cart
-# (src/files_probe.cc) that reads real game files back byte-exact through Exult's
-# own U7open_in and round-trips a GAMEDAT write through the RAM-FS. The imagewin
-# 8bpp blit / audio / main-loop / input slices + the SDL3 compat/ shim (incl.
-# SDL_IOStream, the 2nd I/O path) are the next steps. See README + memory
+# WHAT IT BUILDS: the full from-scratch pipeline (Cronopio tools/host, picolibc
+# +locale, cxxio/cxxfs, cron_sys.bc, Exult's own data via expack, the ROM bake)
+# and then the LIVE Exult cart — gamewin_probe: the full engine frame loop on the
+# VM with the host graphics offload, host-native audio, the native input path and
+# the coroutine modal driver + OSK. The cart RECIPE (engine TU set + flags + the
+# compat/ibuf8.cc offload override + --seal) lives in build_exult_cart.sh, SHARED
+# with the scratch build/gw.sh (fast iterate) so the two never drift. The old
+# isolated render probes (files/win/shape/map/object/text_probe) are kept as
+# diagnostics behind BUILD_PROBES=1. See memory exult-render-slice2b /
 # cronopio-cpp-cart-toolchain / exult-port-scout.
 #
 # Usage:  build_exult.sh [STATIC_DIR]
@@ -33,6 +33,7 @@ SDK="$CRONOPIO/sdk"
 RT="$CRONOPIO/external/CronoVM/runtime/lib"
 PICO_INC="$CRONOPIO/external/CronoVM/external/picolibc/libc/include"
 EX="$ROOT/third_party/exult"   # Exult engine fork (branch cronopio-port)
+IW="$EX/imagewin"
 CRBUILD="$CRONOPIO/build"
 CVMCC="$CRBUILD/_cvm/tools/cvm-cc/cvm-cc.exe"
 HL="$CRBUILD/tools/headless/cronopio-headless.exe"
@@ -190,7 +191,31 @@ if [[ -n "$STATIC_DIR" ]]; then
   ROM_ARG=(--rom="$ROOT/build/exult.rom")
 fi
 
-# --- 6. the cart (slice 1 files probe) --------------------------------------
+# --- 6. the LIVE Exult cart (full engine frame loop + graphics offload) ------
+# gamewin_probe IS the cart (our exult.cc): the full Exult engine on the VM with
+# the host graphics offload (compat/ibuf8.cc -> cron_blt_buf / cron_blt_buf_blend),
+# host-native audio, the native input path, and the coroutine modal driver + OSK.
+# Its recipe (engine TU set + include flags + the ibuf8 offload override + --seal)
+# lives in build_exult_cart.sh, SHARED with the scratch build/gw.sh so the two
+# never drift. Needs the baked ROM (game content) -> requires a STATIC_DIR.
+source "$ROOT/build_exult_cart.sh"
+if [[ -n "$STATIC_DIR" ]]; then
+  echo "[build] building gamewin_probe cart (full Exult engine + host graphics offload)..."
+  build_gamewin_probe "$ROOT/build/gamewin_probe.crom" || {
+    echo "[build] ERROR: building gamewin_probe failed." >&2; exit 1; }
+  echo "[build] OK -> build/gamewin_probe.crom"
+  echo "[build] run: \"$HL\" build/gamewin_probe.crom 600   (the live Exult cart)"
+else
+  echo "[build] (no STATIC_DIR -> skipping gamewin_probe; the live cart needs baked game content)"
+fi
+
+# === legacy isolated render probes (bring-up diagnostics) ====================
+# The old slice probes (files/win/shape/map/object/text_probe) are SUPERSEDED by
+# gamewin_probe above; kept only as isolated render tests. Off by default — set
+# BUILD_PROBES=1 to build them.
+if [[ "${BUILD_PROBES:-}" == 1 ]]; then
+
+# --- 6L. the cart (slice 1 files probe) -------------------------------------
 # Drives Exult's REAL file layer (third_party/exult/files/utils.cc) through the
 # Cronopio bridge (src/files_cron.cc): the istream/ostream factories route reads
 # to the ROM-FS (romfs_cron) then the RAM-FS, writes to the RAM-FS. utils.cc
@@ -300,3 +325,5 @@ if [[ -n "$STATIC_DIR" ]]; then
     echo "[build] ERROR: building text_probe failed." >&2; exit 1; }
   echo "[build] OK -> build/text_probe.crom  (run: \"$HL\" build/text_probe.crom 5 --ppm build/text_shot.ppm  -> real U7 text lines in several fonts)"
 fi
+
+fi  # end: legacy isolated render probes (BUILD_PROBES=1)
