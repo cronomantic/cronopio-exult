@@ -88,16 +88,23 @@ public:
         if (w <= 0 || h <= 0) {
             return;
         }
-        /* Scratch holds the decoded cursor (line_width == w, tightly packed for
-         * cron_image). Grown on demand; re-decoded only when the frame# changes
-         * (the shape switches between hand / speed-arrows rarely). 255 = the
-         * transparent colour-key (RLE skip-runs stay at the pre-fill value). */
+        /* Scratch holds the decoded cursor, and MUST be exactly w wide so its
+         * line_width == w (Image_buffer8 packs tightly): cron_image takes no
+         * stride, it assumes the data is w-wide tightly packed. So the scratch is
+         * re-created whenever the cursor size CHANGES — NOT grow-only. A grow-only
+         * buffer kept the stride of the LARGEST cursor seen, so a smaller arrow
+         * decoded into it (stride = old big w) was then read by cron_image at
+         * stride = current small w → the row pitch mismatched and the small
+         * speed-arrows corrupted intermittently (only when a small arrow followed
+         * a bigger one). Re-decoded only when the frame# changes (the shape
+         * switches between hand / speed-arrows rarely). 255 = the transparent
+         * colour-key (RLE skip-runs stay at the pre-fill value). */
         static Image_buffer8* scratch    = nullptr;
         static int            scratch_w  = 0;
         static int            scratch_h  = 0;
         static int            cached_fn  = -1;
         const int             COLKEY     = 255;
-        if (!scratch || w > scratch_w || h > scratch_h) {
+        if (!scratch || w != scratch_w || h != scratch_h) {
             delete scratch;
             scratch   = new Image_buffer8(w, h);
             scratch_w = w;
